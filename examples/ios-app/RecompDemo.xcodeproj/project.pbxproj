@@ -1,0 +1,34 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		A1 = {isa = PBXBuildFile; fileRef = A2;};
+		A2 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>";};
+		A3 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RecompDemo.app; sourceTree = BUILT_PRODUCTS_DIR;};
+		A4 = {isa = PBXGroup; children = (A2, A5); sourceTree = "<group>";};
+		A5 = {isa = PBXGroup; children = (A3); name = Products; sourceTree = "<group>";};
+		A6 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1); runOnlyForDeploymentPostprocessing = 0;};
+		A7 = {isa = PBXNativeTarget; buildConfigurationList = A8; buildPhases = (A6); buildRules = (); dependencies = (); name = RecompDemo; productName = RecompDemo; productReference = A3; productType = "com.apple.product-type.application";};
+		A8 = {isa = XCConfigurationList; buildConfigurations = (A9); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
+		A9 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {
+			CODE_SIGN_STYLE = Automatic;
+			DEVELOPMENT_TEAM = 6362U7A3T9;
+			GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+			IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+			PRODUCT_BUNDLE_IDENTIFIER = com.zxakito.recompdemo;
+			PRODUCT_NAME = RecompDemo;
+			SWIFT_VERSION = 5.0;
+			LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../out/arm-native/target/aarch64-apple-ios/release";
+			OTHER_LDFLAGS = "-lrecomp_minimal_sample";
+			SDKROOT = iphoneos;
+			TARGETED_DEVICE_FAMILY = 1;
+		};};
+		B1 = {isa = PBXProject; buildConfigurationList = B2; compatibilityVersion = "Xcode 14.0"; mainGroup = A4; productRefGroup = A5; projectDirPath = ""; projectRoot = ""; targets = (A7);};
+		B2 = {isa = XCConfigurationList; buildConfigurations = (B3); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
+		B3 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {SDKROOT = iphoneos;};};
+	};
+	rootObject = B1;
+}

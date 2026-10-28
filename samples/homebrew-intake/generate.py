@@ -26,9 +26,8 @@ def sha256_path(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def build_nro(path: Path, with_assets: bool) -> None:
+def build_nro(path: Path, with_assets: bool, text: bytes = b"TEXT-SEGMENT") -> None:
     header_size = 0x80
-    text = b"TEXT-SEGMENT"
     rodata = b"RODATA-SEGMENT"
     data = b"DATA-SEGMENT"
 
@@ -143,16 +142,26 @@ def build_provenance(path: Path, nro_path: Path, nso_path: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate synthetic homebrew intake inputs")
     parser.add_argument("--no-assets", action="store_true", help="skip asset section")
+    parser.add_argument(
+        "--text-words",
+        type=Path,
+        help="file with one hex AArch64 instruction word per line to use as the NRO .text",
+    )
+    parser.add_argument("--out-dir", type=Path, help="output root (default: this folder)")
     args = parser.parse_args()
 
-    root = Path(__file__).resolve().parent
+    root = args.out_dir or Path(__file__).resolve().parent
     inputs_dir = root / "inputs"
     inputs_dir.mkdir(parents=True, exist_ok=True)
 
     nro_path = inputs_dir / "homebrew.nro"
     nso_path = inputs_dir / "overlay.nso"
 
-    build_nro(nro_path, with_assets=not args.no_assets)
+    text = b"TEXT-SEGMENT"
+    if args.text_words:
+        words = [int(w, 16) for w in args.text_words.read_text().split()]
+        text = struct.pack(f"<{len(words)}I", *words)
+    build_nro(nro_path, with_assets=not args.no_assets, text=text)
     build_nso(nso_path)
     build_provenance(root / "provenance.toml", nro_path, nso_path)
 

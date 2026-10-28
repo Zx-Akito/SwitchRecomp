@@ -11,3 +11,9 @@
 # Python cache
 __pycache__/
 *.pyc
+
+# Local tool outputs
+/tools/difftest/build/
+/examples/ios-app/dd/
+xcuserdata/
+.DS_Store
