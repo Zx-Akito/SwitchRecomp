@@ -167,8 +167,9 @@ impl RuntimeMemory {
         Ok(Self { regions: mapped })
     }
 
+    // Guest loads/stores may be unaligned: AArch64 allows it for normal memory.
     fn load(&self, address: u64, size: usize) -> Result<u64, MemoryStatus> {
-        let region = self.resolve_region(address, size, AccessKind::Read, true)?;
+        let region = self.resolve_region(address, size, AccessKind::Read, false)?;
         let offset = (address - region.spec.base) as usize;
         let mut value = 0u64;
         for i in 0..size {
@@ -178,7 +179,7 @@ impl RuntimeMemory {
     }
 
     fn store(&mut self, address: u64, size: usize, value: u64) -> Result<(), MemoryStatus> {
-        let region = self.resolve_region_mut(address, size, AccessKind::Write, true)?;
+        let region = self.resolve_region_mut(address, size, AccessKind::Write, false)?;
         let offset = (address - region.spec.base) as usize;
         for i in 0..size {
             region.data[offset + i] = ((value >> (i * 8)) & 0xFF) as u8;
@@ -502,10 +503,10 @@ mod tests {
     }
 
     #[test]
-    fn unaligned_is_error() {
+    fn unaligned_access_is_allowed() {
         init_memory(test_layout()).expect("init memory");
-        let err = mem_load_u32(0x1002).unwrap_err();
-        assert_eq!(err, MemoryStatus::Unaligned);
+        mem_store_u32(0x1002, 0xDEADBEEF).expect("unaligned store");
+        assert_eq!(mem_load_u32(0x1002).expect("unaligned load"), 0xDEADBEEF);
     }
 
     #[test]

@@ -39,11 +39,12 @@ pub use recomp_services::{
 };
 pub use recomp_timing::Scheduler;
 
-/// Guest AArch64 integer state shared by all recompiled functions: X0-X30, SP in `x[31]`,
-/// and the NZCV flags.
+/// Guest AArch64 state shared by all recompiled functions: X0-X30, SP in `x[31]`, the
+/// SIMD&FP registers V0-V31 in `simd`, and the NZCV flags.
 #[derive(Debug, Clone, Default)]
 pub struct Cpu {
     pub x: [i64; 32],
+    pub simd: [u128; 32],
     pub n: bool,
     pub z: bool,
     pub c: bool,

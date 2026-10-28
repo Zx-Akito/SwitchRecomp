@@ -187,6 +187,48 @@ pub enum Op {
         #[serde(default)]
         offset: i64,
     },
+    /// Loads `size` bytes (1, 2, 4, 8 or 16) into a SIMD&FP register, zeroing the rest.
+    LoadV {
+        dst: String,
+        addr: String,
+        #[serde(default)]
+        offset: i64,
+        size: u8,
+    },
+    /// Stores the low `size` bytes of a SIMD&FP register.
+    StoreV {
+        src: String,
+        addr: String,
+        #[serde(default)]
+        offset: i64,
+        size: u8,
+    },
+    /// Copies the low `bytes` bytes of a SIMD&FP register and zeroes the rest.
+    MovV {
+        dst: String,
+        src: String,
+        bytes: u8,
+    },
+    ConstV {
+        dst: String,
+        lo: u64,
+        hi: u64,
+    },
+    /// Reads lane `lane` (`bits` wide, zero-extended) of a SIMD&FP register into a GPR.
+    VToX {
+        dst: String,
+        src: String,
+        bits: u8,
+        lane: u8,
+    },
+    /// Writes the low `bits` of a GPR into lane `lane`; `zero_rest` clears the other lanes.
+    XToV {
+        dst: String,
+        src: String,
+        bits: u8,
+        lane: u8,
+        zero_rest: bool,
+    },
     Br {
         target: String,
     },

@@ -621,10 +621,11 @@ fn homebrew_lift_decodes_pairs_and_indexed_addressing() {
         0xA9BF_7BFD_u32, // stp x29, x30, [sp, #-16]!
         0xF862_7820,     // ldr x0, [x1, x2, lsl #3]
         0xA8C1_7BFD,     // ldp x29, x30, [sp], #16
-        0x3C10_0C00,     // str b0, [x0, #-256]! (SIMD, must be rejected)
+        0x3C10_0C00,     // str b0, [x0, #-256]!
+        0x1E22_2820,     // fadd s0, s1, s2 (not supported yet)
     ];
     let mut bytes = Vec::new();
-    for word in &words[..3] {
+    for word in &words[..4] {
         bytes.extend_from_slice(&word.to_le_bytes());
     }
     bytes.extend_from_slice(&ret_x(30).to_le_bytes());
@@ -698,16 +699,26 @@ fn homebrew_lift_decodes_pairs_and_indexed_addressing() {
         "load_i64",
         "const_i64",
         "add_i64",
+        // str b0 pre-index: SIMD&FP store of one byte at x0-256, then x0 -= 256
+        "store_v",
+        "const_i64",
+        "add_i64",
     ];
     assert_eq!(ops, expected);
     assert_eq!(lifted["functions"][0]["blocks"][0]["ops"][0]["offset"], -16);
     assert_eq!(lifted["functions"][0]["blocks"][0]["ops"][1]["offset"], -8);
+    let store_v = &lifted["functions"][0]["blocks"][0]["ops"][13];
+    assert_eq!(
+        (store_v["src"].as_str(), store_v["size"].as_u64()),
+        (Some("v0"), Some(1))
+    );
+    assert_eq!(store_v["offset"], -256);
 
     let simd_dir = base_dir.join("simd");
     fs::create_dir_all(simd_dir.join("segments/sample")).unwrap();
     fs::write(
         simd_dir.join("segments/sample/text.bin"),
-        [words[3].to_le_bytes(), ret_x(30).to_le_bytes()].concat(),
+        [words[4].to_le_bytes(), ret_x(30).to_le_bytes()].concat(),
     )
     .unwrap();
     fs::write(
@@ -737,7 +748,7 @@ fn homebrew_lift_decodes_pairs_and_indexed_addressing() {
     });
     assert!(
         simd.is_err(),
-        "SIMD store must not decode as an integer store"
+        "unsupported instruction must fail a full decode"
     );
 
     lift_homebrew(LiftOptions {
@@ -753,5 +764,5 @@ fn homebrew_lift_decodes_pairs_and_indexed_addressing() {
             .unwrap();
     let terminator = &partial["functions"][0]["blocks"][0]["terminator"];
     assert_eq!(terminator["op"], "trap");
-    assert_eq!(terminator["word"], words[3]);
+    assert_eq!(terminator["word"], words[4]);
 }

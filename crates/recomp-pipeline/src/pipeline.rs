@@ -566,6 +566,111 @@ fn translate_op(
             track_reg(regs, addr);
             emit_store(lines, src, addr, *offset, "mem_store_u64");
         }
+        Op::LoadV {
+            dst,
+            addr,
+            offset,
+            size,
+        } => {
+            track_reg(regs, dst);
+            track_reg(regs, addr);
+            lines.push(format!(
+                "let __recomp_addr = ({addr} as u64).wrapping_add({offset}_i64 as u64);"
+            ));
+            if *size == 16 {
+                lines.push(
+                    "let __recomp_lo = recomp_runtime::mem_load_u64(__recomp_addr)?;".to_string(),
+                );
+                lines.push("let __recomp_hi = recomp_runtime::mem_load_u64(__recomp_addr.wrapping_add(8))?;".to_string());
+                lines.push(format!(
+                    "{dst} = ((__recomp_hi as u128) << 64) | __recomp_lo as u128;"
+                ));
+            } else {
+                let helper = mem_helper("load", *size)?;
+                lines.push(format!(
+                    "{dst} = recomp_runtime::{helper}(__recomp_addr)? as u128;"
+                ));
+            }
+        }
+        Op::StoreV {
+            src,
+            addr,
+            offset,
+            size,
+        } => {
+            track_reg(regs, src);
+            track_reg(regs, addr);
+            lines.push(format!(
+                "let __recomp_addr = ({addr} as u64).wrapping_add({offset}_i64 as u64);"
+            ));
+            if *size == 16 {
+                lines.push(format!(
+                    "recomp_runtime::mem_store_u64(__recomp_addr, {src} as u64)?;"
+                ));
+                lines.push(format!(
+                    "recomp_runtime::mem_store_u64(__recomp_addr.wrapping_add(8), ({src} >> 64) as u64)?;"
+                ));
+            } else {
+                let helper = mem_helper("store", *size)?;
+                lines.push(format!(
+                    "recomp_runtime::{helper}(__recomp_addr, {src} as u64)?;"
+                ));
+            }
+        }
+        Op::MovV { dst, src, bytes } => {
+            track_reg(regs, dst);
+            track_reg(regs, src);
+            if *bytes >= 16 {
+                lines.push(format!("{dst} = {src};"));
+            } else {
+                lines.push(format!(
+                    "{dst} = {src} & {:#x}_u128;",
+                    (1_u128 << (*bytes as u32 * 8)) - 1
+                ));
+            }
+        }
+        Op::ConstV { dst, lo, hi } => {
+            track_reg(regs, dst);
+            lines.push(format!(
+                "{dst} = {:#x}_u128;",
+                ((*hi as u128) << 64) | *lo as u128
+            ));
+        }
+        Op::VToX {
+            dst,
+            src,
+            bits,
+            lane,
+        } => {
+            track_reg(regs, dst);
+            track_reg(regs, src);
+            let mask = u64::MAX >> (64 - *bits as u32);
+            lines.push(format!(
+                "{dst} = (({src} >> {}) as u64 & {mask:#x}) as i64;",
+                *lane as u32 * *bits as u32
+            ));
+        }
+        Op::XToV {
+            dst,
+            src,
+            bits,
+            lane,
+            zero_rest,
+        } => {
+            track_reg(regs, dst);
+            track_reg(regs, src);
+            let mask = u64::MAX >> (64 - *bits as u32);
+            let shift = *lane as u32 * *bits as u32;
+            let value = format!("((({src} as u64) & {mask:#x}) as u128) << {shift}");
+            if *zero_rest {
+                lines.push(format!("{dst} = {value};"));
+            } else {
+                lines.push(format!(
+                    "{dst} = ({dst} & !({:#x}_u128)) | ({value});",
+                    (mask as u128) << shift
+                ));
+            }
+        }
         Op::Br { target } => {
             lines.push(format!(
                 "panic!({});",
@@ -669,6 +774,15 @@ fn emit_load(lines: &mut Vec<String>, dst: &str, addr: &str, offset: i64, helper
         "let __recomp_value = recomp_runtime::{helper}(__recomp_addr)?;"
     ));
     lines.push(format!("{dst} = __recomp_value as i64;"));
+}
+
+fn mem_helper(kind: &str, size: u8) -> Result<String, PipelineError> {
+    match size {
+        1 | 2 | 4 | 8 => Ok(format!("mem_{kind}_u{}", size as u32 * 8)),
+        _ => Err(PipelineError::Module(format!(
+            "unsupported vector access size {size}"
+        ))),
+    }
 }
 
 fn emit_store(lines: &mut Vec<String>, src: &str, addr: &str, offset: i64, helper: &str) {

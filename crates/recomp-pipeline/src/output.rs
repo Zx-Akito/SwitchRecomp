@@ -255,10 +255,12 @@ fn emit_dispatch(functions: &[RustFunction], imports: &[crate::input::Import]) -
     out
 }
 
-/// Index of an architectural register name (`x0`..`x31`); other names are codegen temps.
-fn guest_reg_index(name: &str) -> Option<usize> {
-    let index: usize = name.strip_prefix('x')?.parse().ok()?;
-    (index < 32).then_some(index)
+/// Register file (`x` or `v`) and index of an architectural register name such as `x3` or
+/// `v17`; other names are codegen temps.
+fn guest_reg(name: &str) -> Option<(char, usize)> {
+    let file = name.chars().next().filter(|c| matches!(c, 'x' | 'v'))?;
+    let index: usize = name[1..].parse().ok()?;
+    (index < 32).then_some((file, index))
 }
 
 fn emit_memory_layout_init(out: &mut String, layout: &MemoryLayoutDescriptor) {
@@ -316,11 +318,18 @@ fn emit_function(function: &RustFunction) -> String {
     let mut sync_out = Vec::new();
     let mut sync_in = Vec::new();
     for reg in &function.regs {
-        match guest_reg_index(reg) {
-            Some(index) => {
-                out.push_str(&format!("    let mut {reg}: i64 = ctx.x[{index}];\n"));
-                sync_out.push(format!("ctx.x[{index}] = {reg};"));
-                sync_in.push(format!("{reg} = ctx.x[{index}];"));
+        match guest_reg(reg) {
+            Some((file, index)) => {
+                let (ty, field) = if file == 'v' {
+                    ("u128", "simd")
+                } else {
+                    ("i64", "x")
+                };
+                out.push_str(&format!(
+                    "    let mut {reg}: {ty} = ctx.{field}[{index}];\n"
+                ));
+                sync_out.push(format!("ctx.{field}[{index}] = {reg};"));
+                sync_in.push(format!("{reg} = ctx.{field}[{index}];"));
             }
             None => out.push_str(&format!("    let mut {reg}: i64 = 0;\n")),
         }

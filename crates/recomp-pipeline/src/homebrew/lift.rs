@@ -672,6 +672,10 @@ fn decode_one(
         return Ok(DecodedOutcome::Continue);
     }
 
+    if decode_simd_move(word, state, ops) {
+        return Ok(DecodedOutcome::Continue);
+    }
+
     if let Some(decoded) = decode_load_store(word)? {
         emit_load_store(decoded, state, ops);
         return Ok(DecodedOutcome::Continue);
@@ -1338,9 +1342,221 @@ fn decode_integer_alu(word: u32, state: &mut DecodeState, ops: &mut Vec<Op>) -> 
     false
 }
 
+/// VFPExpandImm: 8-bit floating-point immediate to an IEEE single (`bits` 32) or double.
+fn vfp_expand_imm(imm8: u32, bits: u32) -> u64 {
+    let a = (imm8 >> 7) as u64 & 1;
+    let b = (imm8 >> 6) as u64 & 1;
+    let cd = (imm8 >> 4) as u64 & 3;
+    let efgh = imm8 as u64 & 0xF;
+    if bits == 32 {
+        (a << 31)
+            | ((b ^ 1) << 30)
+            | (if b == 1 { 0x1F << 25 } else { 0 })
+            | (cd << 23)
+            | (efgh << 19)
+    } else {
+        (a << 63)
+            | ((b ^ 1) << 62)
+            | (if b == 1 { 0xFF << 54 } else { 0 })
+            | (cd << 52)
+            | (efgh << 48)
+    }
+}
+
+fn replicate(value: u64, bits: u32) -> u64 {
+    (0..64 / bits).fold(0, |acc, i| acc | (value << (i * bits)))
+}
+
+/// SIMD&FP register moves: MOVI/MVNI/FMOV (immediate), FMOV between general and SIMD&FP
+/// registers, FMOV (register), MOV (vector), UMOV, INS (general) and DUP (general).
+/// Returns false without emitting anything when `word` is none of these.
+fn decode_simd_move(word: u32, state: &mut DecodeState, ops: &mut Vec<Op>) -> bool {
+    let rd = (word & 0x1F) as u8;
+    let rn = ((word >> 5) & 0x1F) as u8;
+    let q = (word >> 30) & 1 == 1;
+    let vd = format!("v{rd}");
+    let vn = format!("v{rn}");
+
+    // Advanced SIMD modified immediate: 0 Q op 0111100000 abc cmode o2 1 defgh Rd.
+    if word & 0x9FF8_0C00 == 0x0F00_0400 {
+        let op = (word >> 29) & 1;
+        let cmode = (word >> 12) & 0xF;
+        let imm8 = (((word >> 16) & 7) << 5) | ((word >> 5) & 0x1F);
+        let (imm64, invertible) = match cmode {
+            0b0000 | 0b0010 | 0b0100 | 0b0110 => (
+                replicate((imm8 as u64) << (8 * ((cmode >> 1) & 3)), 32),
+                true,
+            ),
+            0b1000 | 0b1010 => (
+                replicate((imm8 as u64) << (8 * ((cmode >> 1) & 1)), 16),
+                true,
+            ),
+            0b1100 => (replicate(((imm8 as u64) << 8) | 0xFF, 32), true),
+            0b1101 => (replicate(((imm8 as u64) << 16) | 0xFFFF, 32), true),
+            0b1110 if op == 0 => (replicate(imm8 as u64, 8), false),
+            0b1110 => (
+                (0..8).fold(0, |acc, i| {
+                    acc | if imm8 >> i & 1 == 1 {
+                        0xFF << (i * 8)
+                    } else {
+                        0
+                    }
+                }),
+                false,
+            ),
+            0b1111 if op == 0 => (replicate(vfp_expand_imm(imm8, 32), 32), false),
+            0b1111 if q => (vfp_expand_imm(imm8, 64), false),
+            _ => return false, // ORR/BIC (immediate) and reserved encodings
+        };
+        let imm64 = if op == 1 && invertible { !imm64 } else { imm64 };
+        ops.push(Op::ConstV {
+            dst: vd,
+            lo: imm64,
+            hi: if q { imm64 } else { 0 },
+        });
+        return true;
+    }
+
+    // FMOV (scalar, immediate): 00011110 type 1 imm8 100 00000 Rd.
+    if word & 0xFF20_1FE0 == 0x1E20_1000 {
+        let imm8 = (word >> 13) & 0xFF;
+        let value = match (word >> 22) & 3 {
+            0 => vfp_expand_imm(imm8, 32),
+            1 => vfp_expand_imm(imm8, 64),
+            _ => return false,
+        };
+        ops.push(Op::ConstV {
+            dst: vd,
+            lo: value,
+            hi: 0,
+        });
+        return true;
+    }
+
+    // FMOV (general): sf 0011110 type 1 rmode opcode 000000 Rn Rd.
+    if word & 0x7F20_FC00 == 0x1E20_0000 {
+        let fields = (
+            word >> 31,
+            (word >> 22) & 3,
+            (word >> 19) & 3,
+            (word >> 16) & 7,
+        );
+        let (bits, lane, to_general) = match fields {
+            (0, 0, 0, 6) => (32, 0, true),
+            (0, 0, 0, 7) => (32, 0, false),
+            (1, 1, 0, 6) => (64, 0, true),
+            (1, 1, 0, 7) => (64, 0, false),
+            (1, 2, 1, 6) => (64, 1, true),
+            (1, 2, 1, 7) => (64, 1, false),
+            _ => return false, // conversions are not handled here
+        };
+        if to_general {
+            let dst = dst_zr(rd, state);
+            ops.push(Op::VToX {
+                dst,
+                src: vn,
+                bits,
+                lane,
+            });
+        } else {
+            let src = src_zr(rn, state, ops);
+            ops.push(Op::XToV {
+                dst: vd,
+                src,
+                bits,
+                lane,
+                zero_rest: lane == 0,
+            });
+        }
+        return true;
+    }
+
+    // FMOV (register): 00011110 type 1 0000 00 10000 Rn Rd.
+    if word & 0xFF3F_FC00 == 0x1E20_4000 {
+        let bytes = match (word >> 22) & 3 {
+            0 => 4,
+            1 => 8,
+            _ => return false,
+        };
+        ops.push(Op::MovV {
+            dst: vd,
+            src: vn,
+            bytes,
+        });
+        return true;
+    }
+
+    // MOV (vector), i.e. ORR Vd, Vn, Vn: 0 Q 001110101 Rm 000111 Rn Rd.
+    if word & 0xBFE0_FC00 == 0x0EA0_1C00 && ((word >> 16) & 0x1F) as u8 == rn {
+        ops.push(Op::MovV {
+            dst: vd,
+            src: vn,
+            bytes: if q { 16 } else { 8 },
+        });
+        return true;
+    }
+
+    // UMOV / INS (general) / DUP (general): 0 Q 0 01110000 imm5 0 imm4 1 Rn Rd.
+    if word & 0x9FE0_8400 == 0x0E00_0400 {
+        let imm5 = (word >> 16) & 0x1F;
+        if imm5 & 0xF == 0 {
+            return false;
+        }
+        let size_log2 = imm5.trailing_zeros();
+        let bits = 8_u8 << size_log2;
+        let lane = (imm5 >> (size_log2 + 1)) as u8;
+        match ((word >> 29) & 1, (word >> 11) & 0xF) {
+            // UMOV Wd/Xd, Vn.T[lane]
+            (0, 0b0111) => {
+                let dst = dst_zr(rd, state);
+                ops.push(Op::VToX {
+                    dst,
+                    src: vn,
+                    bits,
+                    lane,
+                });
+            }
+            // INS Vd.T[lane], Wn/Xn
+            (0, 0b0011) if q => {
+                let src = src_zr(rn, state, ops);
+                ops.push(Op::XToV {
+                    dst: vd,
+                    src,
+                    bits,
+                    lane,
+                    zero_rest: false,
+                });
+            }
+            // DUP Vd.T, Wn/Xn
+            (0, 0b0001) => {
+                if bits == 64 && !q {
+                    return false;
+                }
+                let src = src_zr(rn, state, ops);
+                let lanes = (if q { 128 } else { 64 }) / bits as u32;
+                for lane in 0..lanes {
+                    ops.push(Op::XToV {
+                        dst: vd.clone(),
+                        src: src.clone(),
+                        bits,
+                        lane: lane as u8,
+                        zero_rest: lane == 0,
+                    });
+                }
+            }
+            _ => return false,
+        }
+        return true;
+    }
+
+    false
+}
+
 #[derive(Debug, Clone, Copy)]
 struct LoadStore {
     is_load: bool,
+    /// SIMD&FP register transfer (B/H/S/D/Q); `size` 4 means 16 bytes.
+    vector: bool,
     size: u8,
     base: u8,
     rt: u8,
@@ -1354,19 +1570,23 @@ struct LoadStore {
     sign_extend_to: Option<u32>,
 }
 
-/// Integer (non-SIMD) loads/stores: unsigned-offset, unscaled, pre/post-index,
+/// Integer and SIMD&FP loads/stores: unsigned-offset, unscaled, pre/post-index,
 /// register-offset, sign-extending (LDRS*), and LDP/STP/LDNP/STNP/LDPSW.
 fn decode_load_store(word: u32) -> Result<Option<LoadStore>, String> {
     let rn = ((word >> 5) & 0x1F) as u8;
     let rt = (word & 0x1F) as u8;
+    let vector = (word >> 26) & 1 == 1;
 
-    // Pair: opc 101 V=0 idx L imm7 Rt2 Rn Rt.
-    if (word & 0x3E00_0000) == 0x2800_0000 {
+    // Pair: opc 101 V 0 idx L imm7 Rt2 Rn Rt.
+    if (word & 0x3A00_0000) == 0x2800_0000 {
         let is_load = (word >> 22) & 1 == 1;
-        let (size, sign_extend_to) = match (word >> 30, is_load) {
-            (0b00, _) => (2, None),
-            (0b10, _) => (3, None),
-            (0b01, true) => (2, Some(64)), // LDPSW
+        let (size, sign_extend_to) = match (word >> 30, is_load, vector) {
+            (0b00, _, false) => (2, None),
+            (0b10, _, false) => (3, None),
+            (0b01, true, false) => (2, Some(64)), // LDPSW
+            (0b00, _, true) => (2, None),         // S
+            (0b01, _, true) => (3, None),         // D
+            (0b10, _, true) => (4, None),         // Q
             _ => return Ok(None),
         };
         let imm = sign_extend(((word >> 15) & 0x7F) as i64, 7) << size;
@@ -1377,6 +1597,7 @@ fn decode_load_store(word: u32) -> Result<Option<LoadStore>, String> {
         };
         return Ok(Some(LoadStore {
             is_load,
+            vector,
             size,
             base: rn,
             rt,
@@ -1388,20 +1609,26 @@ fn decode_load_store(word: u32) -> Result<Option<LoadStore>, String> {
         }));
     }
 
-    // Single register: size 111 V=0 ...; opc 00 = store, 01 = zero-extending load.
-    if (word & 0x3F00_0000) != 0x3900_0000 && (word & 0x3F00_0000) != 0x3800_0000 {
+    // Single register: size 111 V 0 x ...; opc 00 = store, 01 = zero-extending load.
+    let unsigned_offset = (word & 0x3B00_0000) == 0x3900_0000;
+    if !unsigned_offset && (word & 0x3B00_0000) != 0x3800_0000 {
         return Ok(None);
     }
     let opc = (word >> 22) & 0x3;
-    let size = ((word >> 30) & 0x3) as u8;
-    let sign_extend_to = match (opc, size) {
-        (0 | 1, _) => None,
-        (2, 0..=2) => Some(64),
-        (3, 0 | 1) => Some(32),
+    let mut size = ((word >> 30) & 0x3) as u8;
+    let sign_extend_to = match (opc, size, vector) {
+        (0 | 1, _, _) => None,
+        (2, 0..=2, false) => Some(64),
+        (3, 0 | 1, false) => Some(32),
+        (2 | 3, 0, true) => {
+            size = 4; // Q
+            None
+        }
         _ => return Ok(None), // PRFM and unallocated
     };
     let mut access = LoadStore {
-        is_load: opc != 0,
+        is_load: opc & 1 == 1 || (!vector && opc != 0),
+        vector,
         size,
         base: rn,
         rt,
@@ -1411,7 +1638,7 @@ fn decode_load_store(word: u32) -> Result<Option<LoadStore>, String> {
         writeback: None,
         sign_extend_to,
     };
-    if (word & 0x3F00_0000) == 0x3900_0000 {
+    if unsigned_offset {
         access.offset = (((word >> 10) & 0xFFF) as i64) << size;
         return Ok(Some(access));
     }
@@ -1445,7 +1672,10 @@ fn emit_load_store(decoded: LoadStore, state: &mut DecodeState, ops: &mut Vec<Op
     let mut addr = base.clone();
     if let Some((rm, option, shift)) = decoded.index {
         addr = emit_index_address(&base, rm, option, shift, state, ops);
-    } else if decoded.is_load && (decoded.rt == decoded.base || decoded.rt2 == Some(decoded.base)) {
+    } else if decoded.is_load
+        && !decoded.vector
+        && (decoded.rt == decoded.base || decoded.rt2 == Some(decoded.base))
+    {
         // Keep the original base for the second half of the access.
         addr = state.next_temp("addr");
         ops.push(Op::MovI64 {
@@ -1462,7 +1692,25 @@ fn emit_load_store(decoded: LoadStore, state: &mut DecodeState, ops: &mut Vec<Op
     {
         let offset = decoded.offset + i as i64 * step;
         let addr = addr.clone();
-        if decoded.is_load {
+        if decoded.vector {
+            let reg = format!("v{rt}");
+            let size = 1_u8 << decoded.size;
+            ops.push(if decoded.is_load {
+                Op::LoadV {
+                    dst: reg,
+                    addr,
+                    offset,
+                    size,
+                }
+            } else {
+                Op::StoreV {
+                    src: reg,
+                    addr,
+                    offset,
+                    size,
+                }
+            });
+        } else if decoded.is_load {
             // A load into XZR is discarded.
             let dst = if rt == 31 {
                 state.next_temp("zr")
