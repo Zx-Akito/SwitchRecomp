@@ -308,15 +308,11 @@ fn load_text_segment(
 #[derive(Debug, Default)]
 struct DecodeState {
     temp_counter: u32,
-    reg_values: [Option<i64>; 32],
 }
 
 impl DecodeState {
     fn new() -> Self {
-        Self {
-            temp_counter: 0,
-            reg_values: [None; 32],
-        }
+        Self { temp_counter: 0 }
     }
 
     fn next_temp(&mut self, prefix: &str) -> String {
@@ -516,9 +512,13 @@ fn decode_one(
     pc: u64,
     state: &mut DecodeState,
     ops: &mut Vec<Op>,
-    warnings: &mut Vec<String>,
+    _warnings: &mut Vec<String>,
 ) -> Result<DecodedOutcome, String> {
-    if word == 0xD503201F {
+    // Hints (NOP, YIELD, PAC/BTI landing pads) and CLREX/DSB/DMB/ISB carry no state the
+    // single-threaded translation models.
+    if word & 0xFFFF_F01F == 0xD503_201F
+        || (word & 0xFFFF_F01F == 0xD503_301F && matches!((word >> 5) & 7, 2 | 4 | 5 | 6))
+    {
         return Ok(DecodedOutcome::Continue);
     }
     if is_ret(word) {
@@ -602,7 +602,7 @@ fn decode_one(
     }
 
     if let Some(decoded) = decode_mov_wide(word)? {
-        emit_mov_wide(decoded, pc, state, ops)?;
+        emit_mov_wide(decoded, state, ops);
         return Ok(DecodedOutcome::Continue);
     }
 
@@ -616,18 +616,12 @@ fn decode_one(
         return Ok(DecodedOutcome::Continue);
     }
 
-    if let Some(decoded) = decode_add_sub_register(word)? {
-        emit_add_sub_register(decoded, state, ops);
-        return Ok(DecodedOutcome::Continue);
-    }
-
-    if let Some(decoded) = decode_logical_register(word)? {
-        emit_logical_register(decoded, state, ops);
+    if decode_integer_alu(word, state, ops) {
         return Ok(DecodedOutcome::Continue);
     }
 
     if let Some(decoded) = decode_load_store(word)? {
-        emit_load_store(decoded, ops, warnings);
+        emit_load_store(decoded, state, ops);
         return Ok(DecodedOutcome::Continue);
     }
 
@@ -677,37 +671,35 @@ fn decode_mov_wide(word: u32) -> Result<Option<MovWide>, String> {
     }))
 }
 
-fn emit_mov_wide(
-    decoded: MovWide,
-    pc: u64,
-    state: &mut DecodeState,
-    ops: &mut Vec<Op>,
-) -> Result<(), String> {
+fn emit_mov_wide(decoded: MovWide, state: &mut DecodeState, ops: &mut Vec<Op>) {
     let shift_bits = (decoded.shift as u32) * 16;
     let imm_value = (decoded.imm as u64) << shift_bits;
-    let value = match decoded.kind {
-        MovWideKind::MovZ => imm_value,
-        MovWideKind::MovN => !imm_value,
-        MovWideKind::MovK => {
-            let prev = state.reg_values[decoded.dst as usize].ok_or_else(|| {
-                format!(
-                    "movk requires prior value for x{} at 0x{:x}",
-                    decoded.dst, pc
-                )
-            })?;
-            let mask = !(0xFFFF_u64 << shift_bits);
-            (prev as u64 & mask) | imm_value
+    let dst = dst_zr(decoded.dst, state);
+    match decoded.kind {
+        MovWideKind::MovZ | MovWideKind::MovN => {
+            let value = if matches!(decoded.kind, MovWideKind::MovN) {
+                !imm_value
+            } else {
+                imm_value
+            };
+            ops.push(Op::ConstI64 {
+                dst: dst.clone(),
+                imm: value as i64,
+            });
         }
-    };
-    state.reg_values[decoded.dst as usize] = Some(value as i64);
-    ops.push(Op::ConstI64 {
-        dst: reg_name(decoded.dst),
-        imm: value as i64,
-    });
-    if decoded.is_32 {
-        zero_extend_32(&reg_name(decoded.dst), state, ops);
+        MovWideKind::MovK => {
+            mask_in_place(&dst, !(0xFFFF_u64 << shift_bits), state, ops);
+            let imm = const_temp(imm_value as i64, state, ops);
+            ops.push(Op::OrI64 {
+                dst: dst.clone(),
+                lhs: dst.clone(),
+                rhs: imm,
+            });
+        }
     }
-    Ok(())
+    if decoded.is_32 {
+        zero_extend_32(&dst, state, ops);
+    }
 }
 
 fn decode_adr(word: u32, pc: u64) -> Result<Option<Op>, String> {
@@ -774,209 +766,524 @@ fn decode_add_sub_immediate(word: u32) -> Result<Option<AddSubImm>, String> {
 }
 
 fn emit_add_sub_immediate(decoded: AddSubImm, state: &mut DecodeState, ops: &mut Vec<Op>) {
+    let imm = const_temp(decoded.imm as i64, state, ops);
+    // Immediate forms address SP with register 31, except the flag-setting destination.
+    let dst = if decoded.set_flags && decoded.dst == 31 {
+        None
+    } else {
+        Some(reg_name(decoded.dst))
+    };
+    emit_add_sub(
+        &reg_name(decoded.src),
+        &imm,
+        dst,
+        decoded.is_sub,
+        decoded.set_flags,
+        decoded.is_32,
+        state,
+        ops,
+    );
+}
+
+fn const_temp(value: i64, state: &mut DecodeState, ops: &mut Vec<Op>) -> String {
     let temp = state.next_temp("imm");
     ops.push(Op::ConstI64 {
         dst: temp.clone(),
-        imm: decoded.imm as i64,
+        imm: value,
     });
-    if decoded.set_flags && decoded.dst == 31 {
-        if decoded.is_sub {
-            ops.push(Op::CmpI64 {
-                lhs: reg_name(decoded.src),
-                rhs: temp,
-            });
-        } else {
-            ops.push(Op::CmnI64 {
-                lhs: reg_name(decoded.src),
-                rhs: temp,
-            });
-        }
-        return;
-    }
-    if decoded.is_sub {
-        ops.push(Op::SubI64 {
-            dst: reg_name(decoded.dst),
-            lhs: reg_name(decoded.src),
-            rhs: temp,
-        });
+    temp
+}
+
+/// Source operand where register 31 encodes XZR.
+fn src_zr(reg: u8, state: &mut DecodeState, ops: &mut Vec<Op>) -> String {
+    if reg == 31 {
+        const_temp(0, state, ops)
     } else {
-        ops.push(Op::AddI64 {
-            dst: reg_name(decoded.dst),
-            lhs: reg_name(decoded.src),
-            rhs: temp,
-        });
-    }
-    if decoded.is_32 {
-        zero_extend_32(&reg_name(decoded.dst), state, ops);
+        reg_name(reg)
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct AddSubReg {
-    dst: u8,
-    lhs: u8,
-    rhs: u8,
+/// Destination where register 31 encodes XZR (the result is discarded).
+fn dst_zr(reg: u8, state: &mut DecodeState) -> String {
+    if reg == 31 {
+        state.next_temp("zr")
+    } else {
+        reg_name(reg)
+    }
+}
+
+fn copy_temp(src: &str, state: &mut DecodeState, ops: &mut Vec<Op>) -> String {
+    let temp = state.next_temp("tmp");
+    ops.push(Op::MovI64 {
+        dst: temp.clone(),
+        src: src.to_string(),
+    });
+    temp
+}
+
+/// Sign-extends the low `bits` of `reg` in place.
+fn sign_extend_in_place(reg: &str, bits: u32, state: &mut DecodeState, ops: &mut Vec<Op>) {
+    let k = const_temp(64 - bits as i64, state, ops);
+    ops.push(Op::LslI64 {
+        dst: reg.to_string(),
+        lhs: reg.to_string(),
+        rhs: k.clone(),
+    });
+    ops.push(Op::AsrI64 {
+        dst: reg.to_string(),
+        lhs: reg.to_string(),
+        rhs: k,
+    });
+}
+
+fn mask_in_place(reg: &str, mask: u64, state: &mut DecodeState, ops: &mut Vec<Op>) {
+    let m = const_temp(mask as i64, state, ops);
+    ops.push(Op::AndI64 {
+        dst: reg.to_string(),
+        lhs: reg.to_string(),
+        rhs: m,
+    });
+}
+
+fn low_mask(width: u32) -> u64 {
+    if width >= 64 {
+        u64::MAX
+    } else {
+        (1 << width) - 1
+    }
+}
+
+/// Applies LSL (0), LSR (1) or ASR (2) by `amount`, honouring 32-bit operand width.
+fn emit_shifted(
+    src: &str,
+    kind: u32,
+    amount: u32,
+    is_32: bool,
+    state: &mut DecodeState,
+    ops: &mut Vec<Op>,
+) -> String {
+    if amount == 0 {
+        return src.to_string();
+    }
+    let value = copy_temp(src, state, ops);
+    if is_32 && kind == 1 {
+        zero_extend_32(&value, state, ops);
+    } else if is_32 && kind == 2 {
+        sign_extend_in_place(&value, 32, state, ops);
+    }
+    let k = const_temp(amount as i64, state, ops);
+    let (dst, lhs) = (value.clone(), value.clone());
+    ops.push(match kind {
+        0 => Op::LslI64 { dst, lhs, rhs: k },
+        1 => Op::LsrI64 { dst, lhs, rhs: k },
+        _ => Op::AsrI64 { dst, lhs, rhs: k },
+    });
+    value
+}
+
+/// 32-bit flags: shifting both operands into the top half makes the 64-bit flag
+/// computation produce exactly the 32-bit N, Z, C and V.
+fn flag_operand(src: &str, is_32: bool, state: &mut DecodeState, ops: &mut Vec<Op>) -> String {
+    if !is_32 {
+        return src.to_string();
+    }
+    emit_shifted(src, 0, 32, false, state, ops)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_add_sub(
+    lhs: &str,
+    rhs: &str,
+    dst: Option<String>,
     is_sub: bool,
     set_flags: bool,
     is_32: bool,
-}
-
-fn decode_add_sub_register(word: u32) -> Result<Option<AddSubReg>, String> {
-    let sf = (word >> 31) & 0x1;
-    let op = (word >> 30) & 0x1;
-    let s = (word >> 29) & 0x1;
-    let opcode = (word >> 24) & 0x1F;
-    if opcode != 0b01011 {
-        return Ok(None);
-    }
-    let shift = (word >> 22) & 0x3;
-    let imm6 = (word >> 10) & 0x3F;
-    if shift != 0 || imm6 != 0 {
-        return Ok(None);
-    }
-    let rm = ((word >> 16) & 0x1F) as u8;
-    let rn = ((word >> 5) & 0x1F) as u8;
-    let rd = (word & 0x1F) as u8;
-    Ok(Some(AddSubReg {
-        dst: rd,
-        lhs: rn,
-        rhs: rm,
-        is_sub: op == 1,
-        set_flags: s == 1,
-        is_32: sf == 0,
-    }))
-}
-
-fn emit_add_sub_register(decoded: AddSubReg, state: &mut DecodeState, ops: &mut Vec<Op>) {
-    if decoded.set_flags && decoded.dst == 31 {
-        if decoded.is_sub {
-            ops.push(Op::CmpI64 {
-                lhs: reg_name(decoded.lhs),
-                rhs: reg_name(decoded.rhs),
-            });
+    state: &mut DecodeState,
+    ops: &mut Vec<Op>,
+) {
+    if set_flags {
+        let lhs = flag_operand(lhs, is_32, state, ops);
+        let rhs = flag_operand(rhs, is_32, state, ops);
+        ops.push(if is_sub {
+            Op::CmpI64 { lhs, rhs }
         } else {
-            ops.push(Op::CmnI64 {
-                lhs: reg_name(decoded.lhs),
-                rhs: reg_name(decoded.rhs),
-            });
-        }
+            Op::CmnI64 { lhs, rhs }
+        });
+    }
+    let Some(dst) = dst else {
         return;
-    }
-    if decoded.is_sub {
-        ops.push(Op::SubI64 {
-            dst: reg_name(decoded.dst),
-            lhs: reg_name(decoded.lhs),
-            rhs: reg_name(decoded.rhs),
-        });
+    };
+    let (lhs, rhs) = (lhs.to_string(), rhs.to_string());
+    ops.push(if is_sub {
+        Op::SubI64 {
+            dst: dst.clone(),
+            lhs,
+            rhs,
+        }
     } else {
-        ops.push(Op::AddI64 {
-            dst: reg_name(decoded.dst),
-            lhs: reg_name(decoded.lhs),
-            rhs: reg_name(decoded.rhs),
+        Op::AddI64 {
+            dst: dst.clone(),
+            lhs,
+            rhs,
+        }
+    });
+    if is_32 {
+        zero_extend_32(&dst, state, ops);
+    }
+}
+
+/// opc: 0 AND, 1 ORR, 2 EOR, 3 ANDS. `dst` of None discards the result.
+fn emit_logical(
+    opc: u32,
+    lhs: &str,
+    rhs: &str,
+    dst: String,
+    is_32: bool,
+    state: &mut DecodeState,
+    ops: &mut Vec<Op>,
+) {
+    let (lhs, rhs) = (lhs.to_string(), rhs.to_string());
+    ops.push(match opc {
+        1 => Op::OrI64 {
+            dst: dst.clone(),
+            lhs,
+            rhs,
+        },
+        2 => Op::XorI64 {
+            dst: dst.clone(),
+            lhs,
+            rhs,
+        },
+        _ => Op::AndI64 {
+            dst: dst.clone(),
+            lhs,
+            rhs,
+        },
+    });
+    if is_32 {
+        zero_extend_32(&dst, state, ops);
+    }
+    if opc == 3 {
+        let value = flag_operand(&dst, is_32, state, ops);
+        ops.push(Op::TestI64 {
+            lhs: value.clone(),
+            rhs: value,
         });
     }
-    if decoded.is_32 {
-        zero_extend_32(&reg_name(decoded.dst), state, ops);
-    }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct LogicalReg {
-    dst: u8,
-    lhs: u8,
-    rhs: u8,
-    opc: u8,
-    is_32: bool,
+/// DecodeBitMasks for logical immediates; None for reserved encodings.
+fn decode_bit_mask(n: u32, imms: u32, immr: u32, is_32: bool) -> Option<u64> {
+    let combined = (n << 6) | (!imms & 0x3F);
+    if combined == 0 || (is_32 && n == 1) {
+        return None;
+    }
+    let len = 31 - combined.leading_zeros();
+    if len < 1 {
+        return None;
+    }
+    let size = 1_u32 << len;
+    let levels = size - 1;
+    let (s, r) = (imms & levels, immr & levels);
+    if s == levels {
+        return None;
+    }
+    let ones = low_mask(s + 1);
+    let elem = if r == 0 {
+        ones
+    } else {
+        ((ones >> r) | (ones << (size - r))) & low_mask(size)
+    };
+    let mut value = 0_u64;
+    let mut pos = 0;
+    while pos < 64 {
+        value |= elem << pos;
+        pos += size;
+    }
+    Some(if is_32 { value & 0xFFFF_FFFF } else { value })
 }
 
-fn decode_logical_register(word: u32) -> Result<Option<LogicalReg>, String> {
-    let sf = (word >> 31) & 0x1;
-    let opc = ((word >> 29) & 0x3) as u8;
-    let fixed = (word >> 24) & 0x1F;
-    let n = (word >> 21) & 0x1;
-    if fixed != 0b01010 || n != 0 {
-        return Ok(None);
-    }
-    let shift = (word >> 22) & 0x3;
-    let imm6 = (word >> 10) & 0x3F;
-    if shift != 0 || imm6 != 0 {
-        return Ok(None);
-    }
-    let rm = ((word >> 16) & 0x1F) as u8;
-    let rn = ((word >> 5) & 0x1F) as u8;
+/// Integer data-processing forms: add/sub (shifted and extended register), logical
+/// (shifted register and immediate), SBFM/UBFM, conditional select, and multiply-add.
+/// Returns false without emitting anything when `word` is none of these.
+fn decode_integer_alu(word: u32, state: &mut DecodeState, ops: &mut Vec<Op>) -> bool {
+    let is_32 = word >> 31 == 0;
+    let width = if is_32 { 32 } else { 64 };
     let rd = (word & 0x1F) as u8;
-    Ok(Some(LogicalReg {
-        dst: rd,
-        lhs: rn,
-        rhs: rm,
-        opc,
-        is_32: sf == 0,
-    }))
-}
+    let rn = ((word >> 5) & 0x1F) as u8;
+    let rm = ((word >> 16) & 0x1F) as u8;
 
-fn emit_logical_register(decoded: LogicalReg, state: &mut DecodeState, ops: &mut Vec<Op>) {
-    let dst = reg_name(decoded.dst);
-    let lhs = reg_name(decoded.lhs);
-    let rhs = reg_name(decoded.rhs);
-
-    match decoded.opc {
-        0b00 => {
-            ops.push(Op::AndI64 {
-                dst: dst.clone(),
-                lhs,
-                rhs,
-            });
-            if decoded.is_32 {
-                zero_extend_32(&dst, state, ops);
-            }
+    // Add/sub, shifted register: sf op S 01011 shift 0 Rm imm6 Rn Rd.
+    if word & 0x1F20_0000 == 0x0B00_0000 {
+        let (kind, amount) = ((word >> 22) & 3, (word >> 10) & 0x3F);
+        if kind == 3 || amount >= width {
+            return false;
         }
-        0b01 => {
-            if decoded.lhs == 31 {
-                ops.push(Op::MovI64 {
-                    dst: dst.clone(),
-                    src: rhs,
-                });
-            } else {
-                ops.push(Op::OrI64 {
-                    dst: dst.clone(),
-                    lhs,
-                    rhs,
-                });
-            }
-            if decoded.is_32 {
-                zero_extend_32(&dst, state, ops);
-            }
-        }
-        0b10 => {
-            ops.push(Op::XorI64 {
-                dst: dst.clone(),
-                lhs,
-                rhs,
-            });
-            if decoded.is_32 {
-                zero_extend_32(&dst, state, ops);
-            }
-        }
-        0b11 => {
-            if decoded.dst == 31 {
-                ops.push(Op::TestI64 { lhs, rhs });
-            } else {
-                ops.push(Op::AndI64 {
-                    dst: dst.clone(),
-                    lhs,
-                    rhs,
-                });
-                ops.push(Op::TestI64 {
-                    lhs: dst.clone(),
-                    rhs: dst.clone(),
-                });
-                if decoded.is_32 {
-                    zero_extend_32(&dst, state, ops);
-                }
-            }
-        }
-        _ => {}
+        let set_flags = (word >> 29) & 1 == 1;
+        let lhs = src_zr(rn, state, ops);
+        let rhs = src_zr(rm, state, ops);
+        let rhs = emit_shifted(&rhs, kind, amount, is_32, state, ops);
+        let dst = (rd != 31).then(|| reg_name(rd));
+        emit_add_sub(
+            &lhs,
+            &rhs,
+            dst,
+            (word >> 30) & 1 == 1,
+            set_flags,
+            is_32,
+            state,
+            ops,
+        );
+        return true;
     }
+
+    // Add/sub, extended register: sf op S 01011 00 1 Rm option imm3 Rn Rd (Rn/Rd may be SP).
+    if word & 0x1FE0_0000 == 0x0B20_0000 {
+        let (option, amount) = ((word >> 13) & 7, (word >> 10) & 7);
+        if amount > 4 {
+            return false;
+        }
+        let set_flags = (word >> 29) & 1 == 1;
+        let rhs = src_zr(rm, state, ops);
+        let rhs = copy_temp(&rhs, state, ops);
+        match option {
+            0 => mask_in_place(&rhs, 0xFF, state, ops),
+            1 => mask_in_place(&rhs, 0xFFFF, state, ops),
+            2 => zero_extend_32(&rhs, state, ops),
+            4 => sign_extend_in_place(&rhs, 8, state, ops),
+            5 => sign_extend_in_place(&rhs, 16, state, ops),
+            6 => sign_extend_in_place(&rhs, 32, state, ops),
+            _ => {}
+        }
+        let rhs = emit_shifted(&rhs, 0, amount, false, state, ops);
+        let dst = (!(set_flags && rd == 31)).then(|| reg_name(rd));
+        emit_add_sub(
+            &reg_name(rn),
+            &rhs,
+            dst,
+            (word >> 30) & 1 == 1,
+            set_flags,
+            is_32,
+            state,
+            ops,
+        );
+        return true;
+    }
+
+    // Logical, shifted register: sf opc 01010 shift N Rm imm6 Rn Rd.
+    if word & 0x1F00_0000 == 0x0A00_0000 {
+        let (kind, amount) = ((word >> 22) & 3, (word >> 10) & 0x3F);
+        if kind == 3 || amount >= width {
+            return false;
+        }
+        let lhs = src_zr(rn, state, ops);
+        let rhs = src_zr(rm, state, ops);
+        let mut rhs = emit_shifted(&rhs, kind, amount, is_32, state, ops);
+        if (word >> 21) & 1 == 1 {
+            // BIC/ORN/EON/BICS invert the second operand.
+            let ones = const_temp(-1, state, ops);
+            let inverted = state.next_temp("tmp");
+            ops.push(Op::XorI64 {
+                dst: inverted.clone(),
+                lhs: rhs,
+                rhs: ones,
+            });
+            rhs = inverted;
+        }
+        let dst = dst_zr(rd, state);
+        emit_logical((word >> 29) & 3, &lhs, &rhs, dst, is_32, state, ops);
+        return true;
+    }
+
+    // Logical, immediate: sf opc 100100 N immr imms Rn Rd.
+    if (word >> 23) & 0x3F == 0b10_0100 {
+        let Some(mask) = decode_bit_mask(
+            (word >> 22) & 1,
+            (word >> 10) & 0x3F,
+            (word >> 16) & 0x3F,
+            is_32,
+        ) else {
+            return false;
+        };
+        let opc = (word >> 29) & 3;
+        let lhs = src_zr(rn, state, ops);
+        let imm = const_temp(mask as i64, state, ops);
+        // AND/ORR/EOR may write SP; ANDS writes XZR.
+        let dst = if opc == 3 {
+            dst_zr(rd, state)
+        } else {
+            reg_name(rd)
+        };
+        emit_logical(opc, &lhs, &imm, dst, is_32, state, ops);
+        return true;
+    }
+
+    // Bitfield SBFM/UBFM: sf opc 100110 N immr imms Rn Rd (BFM is not handled).
+    if (word >> 23) & 0x3F == 0b10_0110 {
+        let opc = (word >> 29) & 3;
+        let (n, immr, imms) = ((word >> 22) & 1, (word >> 16) & 0x3F, (word >> 10) & 0x3F);
+        if opc == 1 || opc == 3 || n == is_32 as u32 || immr >= width || imms >= width {
+            return false;
+        }
+        let signed = opc == 0;
+        let src = src_zr(rn, state, ops);
+        let value = copy_temp(&src, state, ops);
+        if imms >= immr {
+            // SBFX/UBFX (and ASR/LSR/SXTW/UXTB... aliases): extract bits imms..immr.
+            if signed {
+                let up = const_temp(63 - imms as i64, state, ops);
+                let down = const_temp((63 - imms + immr) as i64, state, ops);
+                ops.push(Op::LslI64 {
+                    dst: value.clone(),
+                    lhs: value.clone(),
+                    rhs: up,
+                });
+                ops.push(Op::AsrI64 {
+                    dst: value.clone(),
+                    lhs: value.clone(),
+                    rhs: down,
+                });
+            } else {
+                let k = const_temp(immr as i64, state, ops);
+                ops.push(Op::LsrI64 {
+                    dst: value.clone(),
+                    lhs: value.clone(),
+                    rhs: k,
+                });
+                mask_in_place(&value, low_mask(imms - immr + 1), state, ops);
+            }
+        } else {
+            // SBFIZ/UBFIZ (and LSL alias): insert the low imms+1 bits at width-immr.
+            if signed {
+                sign_extend_in_place(&value, imms + 1, state, ops);
+            } else {
+                mask_in_place(&value, low_mask(imms + 1), state, ops);
+            }
+            let k = const_temp((width - immr) as i64, state, ops);
+            ops.push(Op::LslI64 {
+                dst: value.clone(),
+                lhs: value.clone(),
+                rhs: k,
+            });
+        }
+        let dst = dst_zr(rd, state);
+        ops.push(Op::MovI64 {
+            dst: dst.clone(),
+            src: value,
+        });
+        if is_32 {
+            zero_extend_32(&dst, state, ops);
+        }
+        return true;
+    }
+
+    // Conditional select: sf op 0 11010100 Rm cond op2 Rn Rd.
+    if word & 0x3FE0_0800 == 0x1A80_0000 {
+        let Some(cond) = cond_code(((word >> 12) & 0xF) as u8) else {
+            return false;
+        };
+        let then_value = src_zr(rn, state, ops);
+        let else_src = src_zr(rm, state, ops);
+        let else_value = match ((word >> 30) & 1, (word >> 10) & 1) {
+            (0, 0) => else_src,
+            (0, _) => {
+                // CSINC (CSET/CINC)
+                let one = const_temp(1, state, ops);
+                let t = state.next_temp("tmp");
+                ops.push(Op::AddI64 {
+                    dst: t.clone(),
+                    lhs: else_src,
+                    rhs: one,
+                });
+                t
+            }
+            (_, 0) => {
+                // CSINV (CSETM/CINV)
+                let ones = const_temp(-1, state, ops);
+                let t = state.next_temp("tmp");
+                ops.push(Op::XorI64 {
+                    dst: t.clone(),
+                    lhs: else_src,
+                    rhs: ones,
+                });
+                t
+            }
+            _ => {
+                // CSNEG (CNEG)
+                let zero = const_temp(0, state, ops);
+                let t = state.next_temp("tmp");
+                ops.push(Op::SubI64 {
+                    dst: t.clone(),
+                    lhs: zero,
+                    rhs: else_src,
+                });
+                t
+            }
+        };
+        let dst = dst_zr(rd, state);
+        ops.push(Op::SelectI64 {
+            dst: dst.clone(),
+            cond: cond.to_string(),
+            lhs: then_value,
+            rhs: else_value,
+        });
+        if is_32 {
+            zero_extend_32(&dst, state, ops);
+        }
+        return true;
+    }
+
+    // Multiply-add: sf 00 11011 op31 Rm o0 Ra Rn Rd (MADD/MSUB, SMADDL/UMADDL and subtracting forms).
+    if word & 0x7F00_0000 == 0x1B00_0000 {
+        let op31 = (word >> 21) & 7;
+        let widen = match (op31, is_32) {
+            (0, _) => None,
+            (1, false) => Some(true),
+            (5, false) => Some(false),
+            _ => return false, // SMULH/UMULH and reserved
+        };
+        let ra = ((word >> 10) & 0x1F) as u8;
+        let mut lhs = src_zr(rn, state, ops);
+        let mut rhs = src_zr(rm, state, ops);
+        if let Some(signed) = widen {
+            for operand in [&mut lhs, &mut rhs] {
+                let value = copy_temp(operand, state, ops);
+                if signed {
+                    sign_extend_in_place(&value, 32, state, ops);
+                } else {
+                    zero_extend_32(&value, state, ops);
+                }
+                *operand = value;
+            }
+        }
+        let product = state.next_temp("tmp");
+        ops.push(Op::MulI64 {
+            dst: product.clone(),
+            lhs,
+            rhs,
+        });
+        let acc = src_zr(ra, state, ops);
+        let dst = dst_zr(rd, state);
+        ops.push(if (word >> 15) & 1 == 1 {
+            Op::SubI64 {
+                dst: dst.clone(),
+                lhs: acc,
+                rhs: product,
+            }
+        } else {
+            Op::AddI64 {
+                dst: dst.clone(),
+                lhs: acc,
+                rhs: product,
+            }
+        });
+        if is_32 {
+            zero_extend_32(&dst, state, ops);
+        }
+        return true;
+    }
+
+    false
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -985,79 +1292,239 @@ struct LoadStore {
     size: u8,
     base: u8,
     rt: u8,
-    offset: u64,
+    rt2: Option<u8>,
+    /// Register-offset addressing: (rm, extend option, shift amount).
+    index: Option<(u8, u8, u8)>,
+    offset: i64,
+    /// Amount added to the base register after the access (pre/post-index).
+    writeback: Option<i64>,
+    /// Sign-extending load: register width (32 or 64) the value is extended to.
+    sign_extend_to: Option<u32>,
 }
 
+/// Integer (non-SIMD) loads/stores: unsigned-offset, unscaled, pre/post-index,
+/// register-offset, sign-extending (LDRS*), and LDP/STP/LDNP/STNP/LDPSW.
 fn decode_load_store(word: u32) -> Result<Option<LoadStore>, String> {
-    if (word & 0x3B000000) != 0x39000000 {
-        return Ok(None);
-    }
-    let size = ((word >> 30) & 0x3) as u8;
-    let is_load = ((word >> 22) & 0x1) == 1;
-    let imm12 = (word >> 10) & 0xFFF;
     let rn = ((word >> 5) & 0x1F) as u8;
     let rt = (word & 0x1F) as u8;
-    let offset = (imm12 as u64) << size;
-    Ok(Some(LoadStore {
-        is_load,
+
+    // Pair: opc 101 V=0 idx L imm7 Rt2 Rn Rt.
+    if (word & 0x3E00_0000) == 0x2800_0000 {
+        let is_load = (word >> 22) & 1 == 1;
+        let (size, sign_extend_to) = match (word >> 30, is_load) {
+            (0b00, _) => (2, None),
+            (0b10, _) => (3, None),
+            (0b01, true) => (2, Some(64)), // LDPSW
+            _ => return Ok(None),
+        };
+        let imm = sign_extend(((word >> 15) & 0x7F) as i64, 7) << size;
+        let (offset, writeback) = match (word >> 23) & 0x3 {
+            0b00 | 0b10 => (imm, None),
+            0b01 => (0, Some(imm)),
+            _ => (imm, Some(imm)),
+        };
+        return Ok(Some(LoadStore {
+            is_load,
+            size,
+            base: rn,
+            rt,
+            rt2: Some(((word >> 10) & 0x1F) as u8),
+            index: None,
+            offset,
+            writeback,
+            sign_extend_to,
+        }));
+    }
+
+    // Single register: size 111 V=0 ...; opc 00 = store, 01 = zero-extending load.
+    if (word & 0x3F00_0000) != 0x3900_0000 && (word & 0x3F00_0000) != 0x3800_0000 {
+        return Ok(None);
+    }
+    let opc = (word >> 22) & 0x3;
+    let size = ((word >> 30) & 0x3) as u8;
+    let sign_extend_to = match (opc, size) {
+        (0 | 1, _) => None,
+        (2, 0..=2) => Some(64),
+        (3, 0 | 1) => Some(32),
+        _ => return Ok(None), // PRFM and unallocated
+    };
+    let mut access = LoadStore {
+        is_load: opc != 0,
         size,
         base: rn,
         rt,
-        offset,
-    }))
+        rt2: None,
+        index: None,
+        offset: 0,
+        writeback: None,
+        sign_extend_to,
+    };
+    if (word & 0x3F00_0000) == 0x3900_0000 {
+        access.offset = (((word >> 10) & 0xFFF) as i64) << size;
+        return Ok(Some(access));
+    }
+    if (word >> 21) & 1 == 1 {
+        if (word >> 10) & 0x3 != 0b10 {
+            return Ok(None); // atomics
+        }
+        let option = ((word >> 13) & 0x7) as u8;
+        if option & 0b010 == 0 {
+            return Ok(None); // reserved extend
+        }
+        let shift = if (word >> 12) & 1 == 1 { size } else { 0 };
+        access.index = Some((((word >> 16) & 0x1F) as u8, option, shift));
+        return Ok(Some(access));
+    }
+    let imm = sign_extend(((word >> 12) & 0x1FF) as i64, 9);
+    match (word >> 10) & 0x3 {
+        0b00 => access.offset = imm,
+        0b01 => access.writeback = Some(imm),
+        0b11 => {
+            access.offset = imm;
+            access.writeback = Some(imm);
+        }
+        _ => return Ok(None), // unprivileged LDTR/STTR
+    }
+    Ok(Some(access))
 }
 
-fn emit_load_store(decoded: LoadStore, ops: &mut Vec<Op>, warnings: &mut Vec<String>) {
-    let offset = decoded.offset as i64;
+fn emit_load_store(decoded: LoadStore, state: &mut DecodeState, ops: &mut Vec<Op>) {
     let base = reg_name(decoded.base);
-    let reg = reg_name(decoded.rt);
-    let op = match (decoded.is_load, decoded.size) {
-        (true, 0) => Op::LoadI8 {
-            dst: reg,
-            addr: base,
-            offset,
-        },
-        (true, 1) => Op::LoadI16 {
-            dst: reg,
-            addr: base,
-            offset,
-        },
-        (true, 2) => Op::LoadI32 {
-            dst: reg,
-            addr: base,
-            offset,
-        },
-        (true, 3) => Op::LoadI64 {
-            dst: reg,
-            addr: base,
-            offset,
-        },
-        (false, 0) => Op::StoreI8 {
-            src: reg,
-            addr: base,
-            offset,
-        },
-        (false, 1) => Op::StoreI16 {
-            src: reg,
-            addr: base,
-            offset,
-        },
-        (false, 2) => Op::StoreI32 {
-            src: reg,
-            addr: base,
-            offset,
-        },
-        (false, 3) => Op::StoreI64 {
-            src: reg,
-            addr: base,
-            offset,
-        },
-        _ => {
-            warnings.push("unsupported load/store size".to_string());
-            return;
+    let mut addr = base.clone();
+    if let Some((rm, option, shift)) = decoded.index {
+        addr = emit_index_address(&base, rm, option, shift, state, ops);
+    } else if decoded.is_load && (decoded.rt == decoded.base || decoded.rt2 == Some(decoded.base)) {
+        // Keep the original base for the second half of the access.
+        addr = state.next_temp("addr");
+        ops.push(Op::MovI64 {
+            dst: addr.clone(),
+            src: base.clone(),
+        });
+    }
+
+    let step = 1_i64 << decoded.size;
+    for (i, rt) in [Some(decoded.rt), decoded.rt2]
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let offset = decoded.offset + i as i64 * step;
+        let addr = addr.clone();
+        if decoded.is_load {
+            // A load into XZR is discarded.
+            let dst = if rt == 31 {
+                state.next_temp("zr")
+            } else {
+                reg_name(rt)
+            };
+            let loaded = dst.clone();
+            ops.push(match decoded.size {
+                0 => Op::LoadI8 { dst, addr, offset },
+                1 => Op::LoadI16 { dst, addr, offset },
+                2 => Op::LoadI32 { dst, addr, offset },
+                _ => Op::LoadI64 { dst, addr, offset },
+            });
+            if let Some(width) = decoded.sign_extend_to {
+                sign_extend_in_place(&loaded, 8 << decoded.size, state, ops);
+                if width == 32 {
+                    zero_extend_32(&loaded, state, ops);
+                }
+            }
+        } else {
+            let src = if rt == 31 {
+                let zero = state.next_temp("imm");
+                ops.push(Op::ConstI64 {
+                    dst: zero.clone(),
+                    imm: 0,
+                });
+                zero
+            } else {
+                reg_name(rt)
+            };
+            ops.push(match decoded.size {
+                0 => Op::StoreI8 { src, addr, offset },
+                1 => Op::StoreI16 { src, addr, offset },
+                2 => Op::StoreI32 { src, addr, offset },
+                _ => Op::StoreI64 { src, addr, offset },
+            });
         }
-    };
-    ops.push(op);
+    }
+
+    if let Some(amount) = decoded.writeback {
+        let imm = state.next_temp("imm");
+        ops.push(Op::ConstI64 {
+            dst: imm.clone(),
+            imm: amount,
+        });
+        ops.push(Op::AddI64 {
+            dst: base.clone(),
+            lhs: base,
+            rhs: imm,
+        });
+    }
+}
+
+/// addr = base + extend(rm) << shift, for UXTW (010), LSL/UXTX (011), SXTW (110), SXTX (111).
+fn emit_index_address(
+    base: &str,
+    rm: u8,
+    option: u8,
+    shift: u8,
+    state: &mut DecodeState,
+    ops: &mut Vec<Op>,
+) -> String {
+    let index = state.next_temp("addr");
+    // rm == 31 is XZR here.
+    if rm == 31 {
+        ops.push(Op::ConstI64 {
+            dst: index.clone(),
+            imm: 0,
+        });
+    } else {
+        ops.push(Op::MovI64 {
+            dst: index.clone(),
+            src: reg_name(rm),
+        });
+    }
+    match option {
+        0b010 => zero_extend_32(&index, state, ops),
+        0b110 => {
+            let k = state.next_temp("imm");
+            ops.push(Op::ConstI64 {
+                dst: k.clone(),
+                imm: 32,
+            });
+            ops.push(Op::LslI64 {
+                dst: index.clone(),
+                lhs: index.clone(),
+                rhs: k.clone(),
+            });
+            ops.push(Op::AsrI64 {
+                dst: index.clone(),
+                lhs: index.clone(),
+                rhs: k,
+            });
+        }
+        _ => {}
+    }
+    if shift > 0 {
+        let k = state.next_temp("imm");
+        ops.push(Op::ConstI64 {
+            dst: k.clone(),
+            imm: shift as i64,
+        });
+        ops.push(Op::LslI64 {
+            dst: index.clone(),
+            lhs: index.clone(),
+            rhs: k,
+        });
+    }
+    ops.push(Op::AddI64 {
+        dst: index.clone(),
+        lhs: base.to_string(),
+        rhs: index.clone(),
+    });
+    index
 }
 
 fn decode_branch_imm(word: u32, pc: u64) -> Option<u64> {
@@ -1204,5 +1671,38 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
         std::env::current_dir()
             .map_err(|err| err.to_string())
             .map(|cwd| cwd.join(path))
+    }
+}
+
+/// Local diagnostic hook: true when the lifter can decode `word` at `pc`.
+#[doc(hidden)]
+pub fn probe_word(word: u32, pc: u64) -> bool {
+    let mut state = DecodeState::new();
+    let mut ops = Vec::new();
+    let mut warnings = Vec::new();
+    decode_one(word, pc, &mut state, &mut ops, &mut warnings).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_bit_mask;
+
+    #[test]
+    fn bit_mask_matches_assembler_encodings() {
+        // (N, imms, immr, is_32) taken from clang-assembled AND/ORR/EOR immediates.
+        assert_eq!(decode_bit_mask(0, 3, 0, true), Some(0xF)); // and w4, w1, #0xf
+        assert_eq!(
+            decode_bit_mask(0, 39, 8, false),
+            Some(0xFF00_FF00_FF00_FF00)
+        );
+        assert_eq!(
+            decode_bit_mask(0, 60, 0, false),
+            Some(0x5555_5555_5555_5555)
+        );
+        assert_eq!(decode_bit_mask(1, 31, 0, false), Some(0xFFFF_FFFF));
+        assert_eq!(decode_bit_mask(0, 0, 1, true), Some(0x8000_0000)); // tst w1, #0x80000000
+        assert_eq!(decode_bit_mask(0, 25, 24, true), Some(0xFFFF_FF03));
+        assert_eq!(decode_bit_mask(1, 63, 0, false), None); // all-ones is reserved
+        assert_eq!(decode_bit_mask(1, 0, 0, true), None); // N=1 invalid for 32-bit
     }
 }

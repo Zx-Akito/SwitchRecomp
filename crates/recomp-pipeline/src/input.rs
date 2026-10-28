@@ -95,6 +95,17 @@ pub enum Op {
         lhs: String,
         rhs: String,
     },
+    MulI64 {
+        dst: String,
+        lhs: String,
+        rhs: String,
+    },
+    SelectI64 {
+        dst: String,
+        cond: String,
+        lhs: String,
+        rhs: String,
+    },
     LslI64 {
         dst: String,
         lhs: String,

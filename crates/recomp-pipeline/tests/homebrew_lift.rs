@@ -601,3 +601,133 @@ fn str_x_imm(rt: u8, rn: u8, offset: u64) -> u32 {
     let imm12 = (offset >> size) as u32;
     0x3900_0000 | (size << 30) | (imm12 << 10) | ((rn as u32) << 5) | (rt as u32)
 }
+
+#[test]
+fn homebrew_lift_decodes_pairs_and_indexed_addressing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let base_dir = temp.path();
+    let segment_dir = base_dir.join("segments/sample");
+    fs::create_dir_all(&segment_dir).expect("segment dir");
+    let segment_path = segment_dir.join("text.bin");
+
+    let words = [
+        0xA9BF_7BFD_u32, // stp x29, x30, [sp, #-16]!
+        0xF862_7820,     // ldr x0, [x1, x2, lsl #3]
+        0xA8C1_7BFD,     // ldp x29, x30, [sp], #16
+        0x3C10_0C00,     // str b0, [x0, #-256]! (SIMD, must be rejected)
+    ];
+    let mut bytes = Vec::new();
+    for word in &words[..3] {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    bytes.extend_from_slice(&ret_x(30).to_le_bytes());
+    fs::write(&segment_path, &bytes).expect("segment data");
+
+    let module_json = format!(
+        r#"{{
+  "schema_version": "1",
+  "module_type": "homebrew",
+  "modules": [
+    {{
+      "name": "sample",
+      "format": "nro",
+      "input_path": "module.nro",
+      "input_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_size": {size},
+      "build_id": "deadbeef",
+      "segments": [
+        {{
+          "name": "text",
+          "file_offset": 0,
+          "file_size": {size},
+          "memory_offset": 0,
+          "memory_size": {size},
+          "permissions": "r-x",
+          "output_path": "{path}"
+        }}
+      ],
+      "bss": {{ "size": 0, "memory_offset": 0 }}
+    }}
+  ]
+}}"#,
+        size = bytes.len(),
+        path = segment_path.strip_prefix(base_dir).unwrap().display()
+    );
+    let module_path = base_dir.join("module.json");
+    fs::write(&module_path, module_json).expect("write module.json");
+
+    let out_dir = base_dir.join("lifted");
+    lift_homebrew(LiftOptions {
+        module_json_path: module_path,
+        out_dir: out_dir.clone(),
+        entry_name: "entry".to_string(),
+        mode: LiftMode::Decode,
+    })
+    .expect("lift homebrew decode");
+
+    let lifted: Value =
+        serde_json::from_str(&fs::read_to_string(out_dir.join("module.json")).unwrap()).unwrap();
+    let ops: Vec<String> = lifted["functions"][0]["blocks"][0]["ops"]
+        .as_array()
+        .expect("ops")
+        .iter()
+        .map(|op| op["op"].as_str().unwrap().to_string())
+        .collect();
+    let expected = [
+        // stp pre-index: two stores at sp-16 / sp-8, then sp -= 16
+        "store_i64",
+        "store_i64",
+        "const_i64",
+        "add_i64",
+        // ldr register offset: addr = x1 + (x2 << 3)
+        "mov_i64",
+        "const_i64",
+        "lsl_i64",
+        "add_i64",
+        "load_i64",
+        // ldp post-index: two loads at sp / sp+8, then sp += 16
+        "load_i64",
+        "load_i64",
+        "const_i64",
+        "add_i64",
+    ];
+    assert_eq!(ops, expected);
+    assert_eq!(lifted["functions"][0]["blocks"][0]["ops"][0]["offset"], -16);
+    assert_eq!(lifted["functions"][0]["blocks"][0]["ops"][1]["offset"], -8);
+
+    let simd_dir = base_dir.join("simd");
+    fs::create_dir_all(simd_dir.join("segments/sample")).unwrap();
+    fs::write(
+        simd_dir.join("segments/sample/text.bin"),
+        [words[3].to_le_bytes(), ret_x(30).to_le_bytes()].concat(),
+    )
+    .unwrap();
+    fs::write(
+        simd_dir.join("module.json"),
+        fs::read_to_string(base_dir.join("module.json"))
+            .unwrap()
+            .replace(
+                &format!("\"input_size\": {}", bytes.len()),
+                "\"input_size\": 8",
+            )
+            .replace(
+                &format!("\"file_size\": {}", bytes.len()),
+                "\"file_size\": 8",
+            )
+            .replace(
+                &format!("\"memory_size\": {}", bytes.len()),
+                "\"memory_size\": 8",
+            ),
+    )
+    .unwrap();
+    let simd = lift_homebrew(LiftOptions {
+        module_json_path: simd_dir.join("module.json"),
+        out_dir: simd_dir.join("lifted"),
+        entry_name: "entry".to_string(),
+        mode: LiftMode::Decode,
+    });
+    assert!(
+        simd.is_err(),
+        "SIMD store must not decode as an integer store"
+    );
+}

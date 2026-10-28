@@ -400,7 +400,7 @@ fn translate_op(
             track_reg(regs, dst);
             track_reg(regs, lhs);
             track_reg(regs, rhs);
-            lines.push(format!("{dst} = {lhs} + {rhs};"));
+            lines.push(format!("{dst} = {lhs}.wrapping_add({rhs});"));
         }
         Op::MovI64 { dst, src } => {
             track_reg(regs, dst);
@@ -411,7 +411,7 @@ fn translate_op(
             track_reg(regs, dst);
             track_reg(regs, lhs);
             track_reg(regs, rhs);
-            lines.push(format!("{dst} = {lhs} - {rhs};"));
+            lines.push(format!("{dst} = {lhs}.wrapping_sub({rhs});"));
         }
         Op::AndI64 { dst, lhs, rhs } => {
             track_reg(regs, dst);
@@ -470,6 +470,32 @@ fn translate_op(
             lines.push("flag_z = __recomp_tst_res == 0;".to_string());
             lines.push("flag_c = false;".to_string());
             lines.push("flag_v = false;".to_string());
+        }
+        Op::MulI64 { dst, lhs, rhs } => {
+            track_reg(regs, dst);
+            track_reg(regs, lhs);
+            track_reg(regs, rhs);
+            lines.push(format!("{dst} = {lhs}.wrapping_mul({rhs});"));
+        }
+        Op::SelectI64 {
+            dst,
+            cond,
+            lhs,
+            rhs,
+        } => {
+            track_reg(regs, dst);
+            track_reg(regs, lhs);
+            track_reg(regs, rhs);
+            *needs_flags = true;
+            match render_cond_expr(cond) {
+                Some(expr) => {
+                    lines.push(format!("{dst} = if {expr} {{ {lhs} }} else {{ {rhs} }};"))
+                }
+                None => lines.push(format!(
+                    "panic!({});",
+                    rust_string_literal(&format!("unsupported select condition {cond}"))
+                )),
+            }
         }
         Op::LslI64 { dst, lhs, rhs } => {
             track_reg(regs, dst);

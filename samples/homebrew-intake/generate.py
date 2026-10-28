@@ -61,7 +61,7 @@ def build_nro(path: Path, with_assets: bool) -> None:
         asset_header_size = 0x38
         icon = b"SYNTH-ICON-DATA"
         nacp = bytearray(0x4000)
-        nacp[:24] = b"SYNTHETIC NACP METADATA"
+        nacp[:23] = b"SYNTHETIC NACP METADATA"
         romfs = b"ROMFS-SAMPLE-DATA"
 
         icon_offset = asset_header_size
