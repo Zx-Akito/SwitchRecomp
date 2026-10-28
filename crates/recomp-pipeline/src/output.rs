@@ -201,7 +201,19 @@ fn emit_main_rs(program: &RustProgram) -> String {
     out.push_str("    recomp_runtime::init(&runtime_config);\n");
     emit_memory_layout_init(&mut out, &program.memory_layout);
     emit_memory_image_init(&mut out, program.memory_image.as_ref());
-    out.push_str(&format!("    {}()?;\n", program.entry));
+    out.push_str("    let mut ctx = recomp_runtime::Cpu::default();\n");
+    if let Some(stack) = program
+        .memory_layout
+        .regions
+        .iter()
+        .find(|region| region.name == "stack")
+    {
+        out.push_str(&format!(
+            "    ctx.x[31] = {:#x}; // SP starts at the top of the stack region\n",
+            stack.base + stack.size
+        ));
+    }
+    out.push_str(&format!("    {}(&mut ctx)?;\n", program.entry));
     out.push_str(
         "    Ok(())\n}
 \n",
@@ -211,8 +223,36 @@ fn emit_main_rs(program: &RustProgram) -> String {
         out.push_str(&emit_function(function));
         out.push('\n');
     }
+    out.push_str(&emit_dispatch(&program.functions));
 
     out
+}
+
+/// Indirect calls and branches (BLR/BR) resolve guest addresses through this table.
+fn emit_dispatch(functions: &[RustFunction]) -> String {
+    let mut out = String::new();
+    out.push_str("#[allow(dead_code)]\n");
+    out.push_str("fn dispatch(ctx: &mut recomp_runtime::Cpu, address: u64) -> Result<(), recomp_runtime::RuntimeError> {\n");
+    out.push_str("    match address {\n");
+    for function in functions {
+        if let Some(address) = function.address {
+            out.push_str(&format!(
+                "        {address:#x} => {}(ctx),\n",
+                function.name
+            ));
+        }
+    }
+    out.push_str(
+        "        _ => Err(recomp_runtime::RuntimeError::UnknownCallTarget { address }),\n",
+    );
+    out.push_str("    }\n}\n");
+    out
+}
+
+/// Index of an architectural register name (`x0`..`x31`); other names are codegen temps.
+fn guest_reg_index(name: &str) -> Option<usize> {
+    let index: usize = name.strip_prefix('x')?.parse().ok()?;
+    (index < 32).then_some(index)
 }
 
 fn emit_memory_layout_init(out: &mut String, layout: &MemoryLayoutDescriptor) {
@@ -263,21 +303,39 @@ fn emit_memory_image_init(out: &mut String, image: Option<&MemoryImageDescriptor
 fn emit_function(function: &RustFunction) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "fn {}() -> Result<(), recomp_runtime::RuntimeError> {{\n",
+        "fn {}(ctx: &mut recomp_runtime::Cpu) -> Result<(), recomp_runtime::RuntimeError> {{\n",
         function.name
     ));
+    // Guest registers live in locals and are synced with `ctx` around calls and returns.
+    let mut sync_out = Vec::new();
+    let mut sync_in = Vec::new();
     for reg in &function.regs {
-        out.push_str(&format!("    let mut {reg}: i64 = 0;\n"));
+        match guest_reg_index(reg) {
+            Some(index) => {
+                out.push_str(&format!("    let mut {reg}: i64 = ctx.x[{index}];\n"));
+                sync_out.push(format!("ctx.x[{index}] = {reg};"));
+                sync_in.push(format!("{reg} = ctx.x[{index}];"));
+            }
+            None => out.push_str(&format!("    let mut {reg}: i64 = 0;\n")),
+        }
     }
     if function.needs_flags {
-        out.push_str("    let mut flag_n = false;\n");
-        out.push_str("    let mut flag_z = false;\n");
-        out.push_str("    let mut flag_c = false;\n");
-        out.push_str("    let mut flag_v = false;\n");
+        for flag in ["n", "z", "c", "v"] {
+            out.push_str(&format!("    let mut flag_{flag} = ctx.{flag};\n"));
+            sync_out.push(format!("ctx.{flag} = flag_{flag};"));
+            sync_in.push(format!("flag_{flag} = ctx.{flag};"));
+        }
     }
-    if !function.regs.is_empty() || function.needs_flags {
-        out.push('\n');
-    }
+    out.push_str("    #[allow(unused_macros)]\n");
+    out.push_str(&format!(
+        "    macro_rules! sync_out {{ () => {{ {} }}; }}\n",
+        sync_out.join(" ")
+    ));
+    out.push_str("    #[allow(unused_macros)]\n");
+    out.push_str(&format!(
+        "    macro_rules! sync_in {{ () => {{ {} }}; }}\n\n",
+        sync_in.join(" ")
+    ));
     match &function.body {
         FunctionBody::Linear(lines) => {
             for line in lines {
@@ -287,10 +345,10 @@ fn emit_function(function: &RustFunction) -> String {
             }
             if lines
                 .last()
-                .map(|line| !line.trim_start().starts_with("return"))
+                .map(|line| !line.contains("return "))
                 .unwrap_or(true)
             {
-                out.push_str("    Ok(())\n");
+                out.push_str("    sync_out!();\n    Ok(())\n");
             }
         }
         FunctionBody::Blocks(blocks) => {
@@ -359,12 +417,19 @@ fn emit_block_terminator(out: &mut String, terminator: &RustTerminator) {
             out.push_str("                continue;\n");
         }
         RustTerminator::BrIndirect { reg } => {
+            // ponytail: BR is treated as a tail call; in-function jump tables only resolve
+            // if the target is also a function entry.
             out.push_str(&format!(
-                "                panic!(\"indirect branch via {reg} is not supported\");\n"
+                "                sync_out!(); return dispatch(ctx, {reg} as u64);\n"
+            ));
+        }
+        RustTerminator::Trap { pc, word } => {
+            out.push_str(&format!(
+                "                return Err(recomp_runtime::RuntimeError::UnsupportedInstruction {{ pc: {pc:#x}, word: {word:#010x} }});\n"
             ));
         }
         RustTerminator::Ret => {
-            out.push_str("                return Ok(());\n");
+            out.push_str("                sync_out!(); return Ok(());\n");
         }
     }
 }

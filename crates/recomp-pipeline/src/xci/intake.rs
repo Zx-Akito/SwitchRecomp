@@ -314,6 +314,7 @@ fn write_intake_outputs(
         segments: module_segments,
         functions: vec![Function {
             name: "entry".to_string(),
+            address: None,
             ops: vec![Op::Ret],
             blocks: Vec::new(),
         }],

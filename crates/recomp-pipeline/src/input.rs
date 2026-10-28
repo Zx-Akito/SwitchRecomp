@@ -32,6 +32,9 @@ pub struct ModuleSegmentPermissions {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Function {
     pub name: String,
+    /// Guest entry address; functions with one are reachable through indirect calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<u64>,
     #[serde(default)]
     pub ops: Vec<Op>,
     #[serde(default)]
@@ -211,6 +214,15 @@ pub enum Terminator {
     },
     BrIndirect {
         reg: String,
+    },
+    CallIndirect {
+        reg: String,
+        next: String,
+    },
+    /// An instruction the lifter could not translate; raises a runtime error if reached.
+    Trap {
+        pc: u64,
+        word: u32,
     },
     Ret,
 }

@@ -12,6 +12,9 @@ const MAX_FUNCTION_INSTRUCTIONS: usize = 200_000;
 pub enum LiftMode {
     Stub,
     Decode,
+    /// Like Decode, but an unsupported instruction ends its block with a runtime trap
+    /// instead of failing the whole lift.
+    Partial,
 }
 
 #[derive(Debug)]
@@ -19,6 +22,8 @@ pub struct LiftOptions {
     pub module_json_path: PathBuf,
     pub out_dir: PathBuf,
     pub entry_name: String,
+    /// Guest address to start decoding from; defaults to the start of the text segment.
+    pub entry_address: Option<u64>,
     pub mode: LiftMode,
 }
 
@@ -49,7 +54,9 @@ pub fn lift_homebrew(options: LiftOptions) -> Result<LiftReport, String> {
 
     match options.mode {
         LiftMode::Stub => lift_stub(&options, &module_json, base_dir, &out_dir),
-        LiftMode::Decode => lift_decode(&options, &module_json, base_dir, &out_dir),
+        LiftMode::Decode | LiftMode::Partial => {
+            lift_decode(&options, &module_json, base_dir, &out_dir)
+        }
     }
 }
 
@@ -102,6 +109,7 @@ fn lift_stub(
         segments: Vec::new(),
         functions: vec![Function {
             name: options.entry_name.clone(),
+            address: None,
             ops: vec![Op::Ret],
             blocks: Vec::new(),
         }],
@@ -140,9 +148,10 @@ fn lift_decode(
     let mut pending = BTreeSet::new();
     let mut seen = BTreeSet::new();
     let mut name_table = FunctionNames::new();
-    name_table.seed_entry(text.base_addr, options.entry_name.clone());
+    let entry = options.entry_address.unwrap_or(text.base_addr);
+    name_table.seed_entry(entry, options.entry_name.clone());
 
-    pending.insert(text.base_addr);
+    pending.insert(entry);
 
     while let Some(func_addr) = pop_first(&mut pending) {
         if !text.contains(func_addr) {
@@ -158,8 +167,15 @@ fn lift_decode(
 
         let func_name = name_table.name_for(func_addr);
         let mut state = DecodeState::new();
-        let (blocks, call_targets) =
-            decode_function(&text, func_addr, &mut state, &mut warnings, &mut name_table)?;
+        let partial = matches!(options.mode, LiftMode::Partial);
+        let (blocks, call_targets) = decode_function(
+            &text,
+            func_addr,
+            partial,
+            &mut state,
+            &mut warnings,
+            &mut name_table,
+        )?;
 
         for target in call_targets {
             if !text.contains(target) {
@@ -171,6 +187,7 @@ fn lift_decode(
 
         functions.push(Function {
             name: func_name,
+            address: Some(func_addr),
             ops: Vec::new(),
             blocks,
         });
@@ -350,6 +367,7 @@ impl FunctionNames {
 fn decode_function(
     text: &TextSegment,
     entry: u64,
+    partial: bool,
     state: &mut DecodeState,
     warnings: &mut Vec<String>,
     names: &mut FunctionNames,
@@ -367,7 +385,7 @@ fn decode_function(
         }
 
         let (block, block_targets, block_calls, block_insts) =
-            decode_block(text, addr, state, warnings, names)?;
+            decode_block(text, addr, partial, state, warnings, names)?;
         decoded_count += block_insts;
         if decoded_count > MAX_FUNCTION_INSTRUCTIONS {
             return Err(format!(
@@ -394,6 +412,7 @@ fn decode_function(
 fn decode_block(
     text: &TextSegment,
     start: u64,
+    partial: bool,
     state: &mut DecodeState,
     warnings: &mut Vec<String>,
     names: &mut FunctionNames,
@@ -417,7 +436,14 @@ fn decode_block(
             ));
         }
         let word = text.read_word(pc)?;
-        let decoded = decode_one(word, pc, state, &mut ops, warnings)?;
+        let decoded = match decode_one(word, pc, state, &mut ops, warnings) {
+            Ok(decoded) => decoded,
+            Err(err) if partial => {
+                warnings.push(err);
+                DecodedOutcome::Terminate(TermInfo::Trap { pc, word })
+            }
+            Err(err) => return Err(err),
+        };
         inst_count += 1;
 
         match decoded {
@@ -477,6 +503,15 @@ fn lower_terminator(term: TermInfo, names: &mut FunctionNames) -> (Terminator, V
             Vec::new(),
             Vec::new(),
         ),
+        TermInfo::CallIndirect { reg, next } => (
+            Terminator::CallIndirect {
+                reg: reg_name(reg),
+                next: block_label(next),
+            },
+            vec![next],
+            Vec::new(),
+        ),
+        TermInfo::Trap { pc, word } => (Terminator::Trap { pc, word }, Vec::new(), Vec::new()),
         TermInfo::Ret => (Terminator::Ret, Vec::new(), Vec::new()),
     }
 }
@@ -504,6 +539,14 @@ enum TermInfo {
     BrIndirect {
         reg: u8,
     },
+    CallIndirect {
+        reg: u8,
+        next: u64,
+    },
+    Trap {
+        pc: u64,
+        word: u32,
+    },
     Ret,
 }
 
@@ -526,6 +569,13 @@ fn decode_one(
     }
     if let Some(reg) = decode_br_register(word) {
         return Ok(DecodedOutcome::Terminate(TermInfo::BrIndirect { reg }));
+    }
+    // BLR
+    if word & 0xFFFF_FC1F == 0xD63F_0000 {
+        return Ok(DecodedOutcome::Terminate(TermInfo::CallIndirect {
+            reg: ((word >> 5) & 0x1F) as u8,
+            next: pc.wrapping_add(4),
+        }));
     }
     if let Some(target) = decode_branch_imm(word, pc) {
         return Ok(DecodedOutcome::Terminate(TermInfo::Br { target }));

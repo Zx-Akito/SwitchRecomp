@@ -349,6 +349,7 @@ fn translate_linear_function(
 
     Ok(RustFunction {
         name: function.name.clone(),
+        address: function.address,
         regs,
         needs_flags,
         body: FunctionBody::Linear(lines),
@@ -368,7 +369,7 @@ fn translate_block_function(
         for op in &block.ops {
             translate_op(op, config, &mut regs, &mut lines, &mut needs_flags)?;
         }
-        let terminator = translate_terminator(block, &mut needs_flags)?;
+        let terminator = translate_terminator(block, &mut regs, &mut needs_flags)?;
         blocks.push(RustBlock {
             label: block.label.clone(),
             lines,
@@ -378,6 +379,7 @@ fn translate_block_function(
 
     Ok(RustFunction {
         name: function.name.clone(),
+        address: function.address,
         regs,
         needs_flags,
         body: FunctionBody::Blocks(blocks),
@@ -593,7 +595,7 @@ fn translate_op(
             lines.push(call);
         }
         Op::Ret => {
-            lines.push("return Ok(());".to_string());
+            lines.push("sync_out!(); return Ok(());".to_string());
         }
     }
     Ok(())
@@ -601,6 +603,7 @@ fn translate_op(
 
 fn translate_terminator(
     block: &Block,
+    regs: &mut Vec<String>,
     needs_flags: &mut bool,
 ) -> Result<RustTerminator, PipelineError> {
     match &block.terminator {
@@ -628,14 +631,28 @@ fn translate_terminator(
                 next: next.clone(),
             })
         }
-        Terminator::BrIndirect { reg } => Ok(RustTerminator::BrIndirect { reg: reg.clone() }),
+        Terminator::BrIndirect { reg } => {
+            track_reg(regs, reg);
+            Ok(RustTerminator::BrIndirect { reg: reg.clone() })
+        }
+        Terminator::CallIndirect { reg, next } => {
+            track_reg(regs, reg);
+            Ok(RustTerminator::Call {
+                call_line: format!("sync_out!(); dispatch(ctx, {reg} as u64)?; sync_in!();"),
+                next: next.clone(),
+            })
+        }
+        Terminator::Trap { pc, word } => Ok(RustTerminator::Trap {
+            pc: *pc,
+            word: *word,
+        }),
         Terminator::Ret => Ok(RustTerminator::Ret),
     }
 }
 
 fn render_call_line(target: &str) -> String {
     if is_rust_ident(target) {
-        format!("{target}()?;")
+        format!("sync_out!(); {target}(ctx)?; sync_in!();")
     } else {
         format!(
             "panic!({});",
@@ -645,7 +662,7 @@ fn render_call_line(target: &str) -> String {
 }
 
 fn emit_load(lines: &mut Vec<String>, dst: &str, addr: &str, offset: i64, helper: &str) {
-    let address_expr = format!("({addr} as u64).wrapping_add({offset} as u64)");
+    let address_expr = format!("({addr} as u64).wrapping_add({offset}_i64 as u64)");
     lines.push(format!("let __recomp_addr = {address_expr};"));
     lines.push(format!(
         "let __recomp_value = recomp_runtime::{helper}(__recomp_addr)?;"
@@ -654,7 +671,7 @@ fn emit_load(lines: &mut Vec<String>, dst: &str, addr: &str, offset: i64, helper
 }
 
 fn emit_store(lines: &mut Vec<String>, src: &str, addr: &str, offset: i64, helper: &str) {
-    let address_expr = format!("({addr} as u64).wrapping_add({offset} as u64)");
+    let address_expr = format!("({addr} as u64).wrapping_add({offset}_i64 as u64)");
     lines.push(format!("let __recomp_addr = {address_expr};"));
     lines.push(format!(
         "recomp_runtime::{helper}(__recomp_addr, {src} as u64)?;"
@@ -701,6 +718,7 @@ fn rust_string_literal(value: &str) -> String {
 #[derive(Debug)]
 pub struct RustFunction {
     pub name: String,
+    pub address: Option<u64>,
     pub regs: Vec<String>,
     pub needs_flags: bool,
     pub body: FunctionBody,
@@ -736,6 +754,10 @@ pub enum RustTerminator {
     },
     BrIndirect {
         reg: String,
+    },
+    Trap {
+        pc: u64,
+        word: u32,
     },
     Ret,
 }

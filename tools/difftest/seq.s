@@ -1,3 +1,15 @@
+// Calls: direct (bl) and indirect (blr), arguments/results in x0/x1, stack spill of x29/x30.
+stp x29, x30, [sp, #-16]!
+mov x0, #5
+mov x1, #7
+bl add_mul
+mov x19, x0
+adr x9, add_mul
+mov x0, #2
+mov x1, #3
+blr x9
+add x0, x0, x19
+// Straight-line integer coverage.
 movz x1, #0x1234
 movk x1, #0xabcd, lsl #16
 movn x2, #0
@@ -16,7 +28,7 @@ cmp w1, #5
 cset w14, lt
 csel x15, x1, x2, ge
 cmp x1, x2
-csinc x16, x1, x3, hi
+csinc x15, x1, x3, hi
 mul x17, x1, x1
 smaddl x25, w1, w2, x3
 umaddl x19, w1, w2, x3
@@ -29,3 +41,11 @@ lsl x24, x1, #60
 adds w26, w1, w1
 cset w27, hs
 cneg x28, x1, mi
+ldp x29, x30, [sp], #16
+ret
+
+// x0 = (x0 + x1) * x1
+add_mul:
+add x2, x0, x1
+mul x0, x2, x1
+ret

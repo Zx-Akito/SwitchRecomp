@@ -38,6 +38,17 @@ pub use recomp_services::{
 };
 pub use recomp_timing::Scheduler;
 
+/// Guest AArch64 integer state shared by all recompiled functions: X0-X30, SP in `x[31]`,
+/// and the NZCV flags.
+#[derive(Debug, Clone, Default)]
+pub struct Cpu {
+    pub x: [i64; 32],
+    pub n: bool,
+    pub z: bool,
+    pub c: bool,
+    pub v: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerformanceMode {
     Handheld,
@@ -81,6 +92,10 @@ pub enum RuntimeError {
         address: u64,
         size: usize,
     },
+    #[error("no recompiled function at {address:#x}")]
+    UnknownCallTarget { address: u64 },
+    #[error("instruction {word:#010x} at {pc:#x} was not recompiled")]
+    UnsupportedInstruction { pc: u64, word: u32 },
 }
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;

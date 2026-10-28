@@ -80,8 +80,19 @@ struct HomebrewLiftArgs {
     out_dir: PathBuf,
     #[arg(long, default_value = "entry")]
     entry: String,
+    /// Address to start decoding from (hex with 0x prefix, or decimal).
+    #[arg(long, value_parser = parse_address)]
+    entry_address: Option<u64>,
     #[arg(long, value_enum, default_value = "decode")]
     mode: HomebrewLiftMode,
+}
+
+fn parse_address(value: &str) -> Result<u64, String> {
+    match value.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => value.parse(),
+    }
+    .map_err(|err| format!("invalid address {value}: {err}"))
 }
 
 #[derive(Parser, Debug)]
@@ -122,6 +133,7 @@ enum XciToolPreferenceArg {
 enum HomebrewLiftMode {
     Stub,
     Decode,
+    Partial,
 }
 
 impl From<HomebrewLiftMode> for LiftMode {
@@ -129,6 +141,7 @@ impl From<HomebrewLiftMode> for LiftMode {
         match value {
             HomebrewLiftMode::Stub => LiftMode::Stub,
             HomebrewLiftMode::Decode => LiftMode::Decode,
+            HomebrewLiftMode::Partial => LiftMode::Partial,
         }
     }
 }
@@ -250,6 +263,7 @@ fn main() {
                 module_json_path: lift.module_json,
                 out_dir: lift.out_dir,
                 entry_name: lift.entry,
+                entry_address: lift.entry_address,
                 mode: lift.mode.into(),
             };
             match lift_homebrew(options) {

@@ -49,6 +49,7 @@ fn homebrew_lift_emits_stub_module() {
         module_json_path: module_path,
         out_dir: out_dir.clone(),
         entry_name: "entry".to_string(),
+        entry_address: None,
         mode: LiftMode::Stub,
     })
     .expect("lift homebrew");
@@ -135,6 +136,7 @@ fn homebrew_lift_decodes_minimal_block() {
         module_json_path: module_path,
         out_dir: out_dir.clone(),
         entry_name: "entry".to_string(),
+        entry_address: None,
         mode: LiftMode::Decode,
     })
     .expect("lift homebrew decode");
@@ -255,6 +257,7 @@ fn homebrew_lift_discovers_call_targets() {
         module_json_path: module_path,
         out_dir: out_dir.clone(),
         entry_name: "entry".to_string(),
+        entry_address: None,
         mode: LiftMode::Decode,
     })
     .expect("lift homebrew decode");
@@ -333,6 +336,7 @@ fn homebrew_lift_builds_conditional_blocks() {
         module_json_path: module_path,
         out_dir: out_dir.clone(),
         entry_name: "entry".to_string(),
+        entry_address: None,
         mode: LiftMode::Decode,
     })
     .expect("lift homebrew decode");
@@ -411,6 +415,7 @@ fn homebrew_lift_handles_indirect_branch() {
         module_json_path: module_path,
         out_dir: out_dir.clone(),
         entry_name: "entry".to_string(),
+        entry_address: None,
         mode: LiftMode::Decode,
     })
     .expect("lift homebrew decode");
@@ -490,6 +495,7 @@ fn homebrew_lift_decodes_load_store_ops() {
         module_json_path: module_path,
         out_dir: out_dir.clone(),
         entry_name: "entry".to_string(),
+        entry_address: None,
         mode: LiftMode::Decode,
     })
     .expect("lift homebrew decode");
@@ -567,6 +573,7 @@ fn homebrew_lift_rejects_oversized_block() {
         module_json_path: module_path,
         out_dir: out_dir.clone(),
         entry_name: "entry".to_string(),
+        entry_address: None,
         mode: LiftMode::Decode,
     })
     .expect_err("expected decode failure");
@@ -661,6 +668,7 @@ fn homebrew_lift_decodes_pairs_and_indexed_addressing() {
         module_json_path: module_path,
         out_dir: out_dir.clone(),
         entry_name: "entry".to_string(),
+        entry_address: None,
         mode: LiftMode::Decode,
     })
     .expect("lift homebrew decode");
@@ -724,10 +732,26 @@ fn homebrew_lift_decodes_pairs_and_indexed_addressing() {
         module_json_path: simd_dir.join("module.json"),
         out_dir: simd_dir.join("lifted"),
         entry_name: "entry".to_string(),
+        entry_address: None,
         mode: LiftMode::Decode,
     });
     assert!(
         simd.is_err(),
         "SIMD store must not decode as an integer store"
     );
+
+    lift_homebrew(LiftOptions {
+        module_json_path: simd_dir.join("module.json"),
+        out_dir: simd_dir.join("partial"),
+        entry_name: "entry".to_string(),
+        entry_address: None,
+        mode: LiftMode::Partial,
+    })
+    .expect("partial lift tolerates unsupported instructions");
+    let partial: Value =
+        serde_json::from_str(&fs::read_to_string(simd_dir.join("partial/module.json")).unwrap())
+            .unwrap();
+    let terminator = &partial["functions"][0]["blocks"][0]["terminator"];
+    assert_eq!(terminator["op"], "trap");
+    assert_eq!(terminator["word"], words[3]);
 }

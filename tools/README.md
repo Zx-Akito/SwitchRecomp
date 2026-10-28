@@ -22,6 +22,17 @@ Setup: `python3 -m venv .venv && .venv/bin/pip install -r tools/switch/requireme
    .venv/bin/python -I tools/switch/report.py nso/main
    ```
 
+5. Lift from an exported entry point. Retail processes start in `rtld`, so `main`'s text
+   does not begin with code; start from `nnMain` instead (its address is in the module's
+   dynamic symbol table). `--mode partial` turns unsupported instructions into runtime
+   traps instead of failing the lift. Write a `module.json` whose text segment points at
+   `nso/main/text.bin` (same shape as the homebrew intake output), then:
+
+   ```sh
+   ./target/release/recomp homebrew-lift --module-json lift/module.json --out-dir lift/out \
+     --mode partial --entry nnMain --entry-address 0x<nnMain>
+   ```
+
 ## `difftest/`: lifter differential test
 
 `tools/difftest/run.sh` runs `seq.s` on the host CPU and through intake, lift and Rust

@@ -576,6 +576,7 @@ pub fn run_automation(config_path: &Path) -> Result<RunManifest, String> {
                             .lift_entry
                             .clone()
                             .unwrap_or_else(|| "entry".to_string()),
+                        entry_address: None,
                         mode: config
                             .run
                             .lift_mode
