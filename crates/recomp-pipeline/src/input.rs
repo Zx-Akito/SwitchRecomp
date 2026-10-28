@@ -6,6 +6,16 @@ pub struct Module {
     #[serde(default)]
     pub segments: Vec<ModuleSegment>,
     pub functions: Vec<Function>,
+    /// Imported symbols bound to placeholder guest addresses; calls to them go to the
+    /// runtime's high-level emulation table.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<Import>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Import {
+    pub address: u64,
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

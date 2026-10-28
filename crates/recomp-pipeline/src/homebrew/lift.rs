@@ -113,6 +113,7 @@ fn lift_stub(
             ops: vec![Op::Ret],
             blocks: Vec::new(),
         }],
+        imports: Vec::new(),
     };
 
     let output_path = out_dir.join("module.json");
@@ -203,6 +204,7 @@ fn lift_decode(
         arch: "aarch64".to_string(),
         segments: Vec::new(),
         functions,
+        imports: Vec::new(),
     };
 
     let output_path = out_dir.join("module.json");

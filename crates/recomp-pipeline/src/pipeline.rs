@@ -295,6 +295,7 @@ fn translate_module(
         performance_mode: config.runtime.performance_mode,
         memory_layout: config.memory_layout.clone(),
         memory_image,
+        imports: module.imports.clone(),
     })
 }
 
@@ -771,6 +772,7 @@ pub struct RustProgram {
     pub performance_mode: PerformanceMode,
     pub memory_layout: MemoryLayoutDescriptor,
     pub memory_image: Option<MemoryImageDescriptor>,
+    pub imports: Vec<crate::input::Import>,
 }
 
 impl RustProgram {

@@ -318,6 +318,7 @@ fn write_intake_outputs(
             ops: vec![Op::Ret],
             blocks: Vec::new(),
         }],
+        imports: Vec::new(),
     };
     let module_json_path = options.out_dir.join("module.json");
     let module_json_src =

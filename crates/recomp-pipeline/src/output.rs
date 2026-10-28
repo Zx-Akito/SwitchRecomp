@@ -223,13 +223,13 @@ fn emit_main_rs(program: &RustProgram) -> String {
         out.push_str(&emit_function(function));
         out.push('\n');
     }
-    out.push_str(&emit_dispatch(&program.functions));
+    out.push_str(&emit_dispatch(&program.functions, &program.imports));
 
     out
 }
 
 /// Indirect calls and branches (BLR/BR) resolve guest addresses through this table.
-fn emit_dispatch(functions: &[RustFunction]) -> String {
+fn emit_dispatch(functions: &[RustFunction], imports: &[crate::input::Import]) -> String {
     let mut out = String::new();
     out.push_str("#[allow(dead_code)]\n");
     out.push_str("fn dispatch(ctx: &mut recomp_runtime::Cpu, address: u64) -> Result<(), recomp_runtime::RuntimeError> {\n");
@@ -241,6 +241,12 @@ fn emit_dispatch(functions: &[RustFunction]) -> String {
                 function.name
             ));
         }
+    }
+    for import in imports {
+        out.push_str(&format!(
+            "        {:#x} => recomp_runtime::hle::call(ctx, {:?}),\n",
+            import.address, import.name
+        ));
     }
     out.push_str(
         "        _ => Err(recomp_runtime::RuntimeError::UnknownCallTarget { address }),\n",

@@ -8,7 +8,8 @@ Writes to <out_dir>:
   text.bin, rodata.bin, data.bin   segment bytes with relocations applied (module base 0)
   segments.json                    "segments" list for a lifted module.json
   memory_layout.toml               [runtime.memory_layout] regions for title.toml
-  imports.tsv                      placeholder address -> imported symbol name
+  imports.tsv / imports.json       placeholder address -> imported symbol name
+                                   (imports.json is the lifted module.json "imports" list)
 
 Imports are bound to unique placeholder addresses at IMPORT_BASE so an unresolved call
 reports exactly which symbol it needed (UnknownCallTarget { address }).
@@ -134,6 +135,9 @@ def main():
     with (out_dir / "imports.tsv").open("w") as f:
         for addr, name in sorted(imports.values()):
             f.write(f"{addr:#x}\t{name}\n")
+    (out_dir / "imports.json").write_text(
+        json.dumps([{"address": a, "name": n} for a, n in sorted(imports.values())], indent=2)
+    )
 
     print(f"image {len(image):#x} bytes, bss {bss_size:#x}, relocations {counts}, "
           f"imports {len(imports)}")

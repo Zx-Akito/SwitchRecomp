@@ -2,6 +2,7 @@ use std::fmt;
 
 mod audio;
 mod boot;
+pub mod hle;
 mod homebrew;
 mod input;
 mod input_replay;
@@ -94,6 +95,8 @@ pub enum RuntimeError {
     },
     #[error("no recompiled function at {address:#x}")]
     UnknownCallTarget { address: u64 },
+    #[error("imported function {symbol} has no high-level emulation")]
+    UnimplementedImport { symbol: String },
     #[error("instruction {word:#010x} at {pc:#x} was not recompiled")]
     UnsupportedInstruction { pc: u64, word: u32 },
 }
