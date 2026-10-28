@@ -366,6 +366,31 @@ impl FunctionNames {
     }
 }
 
+/// Guest text mapped at an address, for decoding functions on demand (the runtime
+/// interpreter fallback uses this for code that was not recompiled ahead of time).
+pub struct TextImage(TextSegment);
+
+impl TextImage {
+    pub fn new(bytes: Vec<u8>, base_addr: u64) -> Self {
+        Self(TextSegment { bytes, base_addr })
+    }
+
+    pub fn contains(&self, addr: u64) -> bool {
+        self.0.contains(addr)
+    }
+
+    /// Decodes the function at `entry` in partial mode: unsupported instructions become
+    /// trap terminators. Direct call targets are named `fn_<address as 16 hex digits>`.
+    pub fn lift_function(&self, entry: u64) -> Result<Vec<Block>, String> {
+        let mut state = DecodeState::new();
+        let mut warnings = Vec::new();
+        let mut names = FunctionNames::new();
+        let (blocks, _) =
+            decode_function(&self.0, entry, true, &mut state, &mut warnings, &mut names)?;
+        Ok(blocks)
+    }
+}
+
 fn decode_function(
     text: &TextSegment,
     entry: u64,
@@ -405,8 +430,13 @@ fn decode_function(
         blocks.insert(addr, block);
     }
 
+    // Code generation and the interpreter both start at the first block.
+    let entry_block = blocks.remove(&entry);
     Ok((
-        blocks.into_values().collect(),
+        entry_block
+            .into_iter()
+            .chain(blocks.into_values())
+            .collect(),
         call_targets.into_iter().collect(),
     ))
 }

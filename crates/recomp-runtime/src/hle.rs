@@ -28,7 +28,8 @@ pub fn set_guest_dispatch(dispatch: GuestCall) {
     let _ = GUEST_DISPATCH.set(dispatch);
 }
 
-fn call_guest(ctx: &mut Cpu, address: u64) -> RuntimeResult<()> {
+/// Calls guest code at `address` through the registered dispatch table.
+pub fn call_guest(ctx: &mut Cpu, address: u64) -> RuntimeResult<()> {
     let dispatch = GUEST_DISPATCH
         .get()
         .ok_or(RuntimeError::UnknownCallTarget { address })?;

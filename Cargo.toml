@@ -2,6 +2,7 @@
 members = [
   "crates/recomp-cli",
   "crates/recomp-gfx",
+  "crates/recomp-interp",
   "crates/recomp-isa",
   "crates/recomp-pipeline",
   "crates/recomp-runtime",

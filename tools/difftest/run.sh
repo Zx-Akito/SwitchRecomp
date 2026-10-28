@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Differential test for the AArch64 lifter (macOS on Apple Silicon only).
-# Runs seq.s on the host CPU and through intake -> lift -> Rust, then compares registers.
+# Runs each sequence on the host CPU, through intake -> lift -> Rust, and through the
+# runtime interpreter, then compares registers.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -13,6 +14,8 @@ REGS="0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 17 19 20 21 22 23 24 25 26 27 28"
 VREGS="0 1 2 3 4 5 6 7 16 17 18 19 20 21 22 23 24 25 26 27 28 29"
 
 cargo build -q --release -p recomp-cli --manifest-path "$ROOT/Cargo.toml"
+cargo build -q --release -p recomp-interp --example run_words --manifest-path "$ROOT/Cargo.toml"
+INTERP="$ROOT/target/release/examples/run_words"
 RECOMP="$ROOT/target/release/recomp"
 rm -rf "$BUILD"
 status=0
@@ -97,12 +100,17 @@ open(path, "w").write(src.replace(call, call + " " + prints, 1))
 PY
 cargo run -q --manifest-path "$B/out/Cargo.toml" 2> /dev/null | grep '^[xv]' > "$B/recomp.txt" || true
 
-if diff "$B/native.txt" "$B/recomp.txt"; then
-  echo "$NAME: MATCH ($(wc -l < "$B/native.txt" | tr -d ' ') registers)"
-else
-  echo "$NAME: MISMATCH (left: native, right: recompiled)" >&2
-  status=1
-fi
+# 3. Interpreted: the same words run by the runtime fallback interpreter only.
+"$INTERP" "$B/words.txt" "$REGS" "$VREGS" > "$B/interp.txt" 2> /dev/null || true
+
+for MODE in recomp interp; do
+  if diff "$B/native.txt" "$B/$MODE.txt"; then
+    echo "$NAME/$MODE: MATCH ($(wc -l < "$B/native.txt" | tr -d ' ') registers)"
+  else
+    echo "$NAME/$MODE: MISMATCH (left: native, right: $MODE)" >&2
+    status=1
+  fi
+done
 done
 done
 exit $status

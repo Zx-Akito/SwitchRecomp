@@ -174,9 +174,10 @@ fn find_manifest_self_entry_mut(
 
 fn emit_cargo_toml(program: &RustProgram, runtime_rel: &Path) -> String {
     format!(
-        "[package]\nname = \"recomp-{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nrecomp-runtime = {{ path = \"{runtime}\" }}\n",
+        "[package]\nname = \"recomp-{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nrecomp-runtime = {{ path = \"{runtime}\" }}\nrecomp-interp = {{ path = \"{interp}\" }}\n",
         name = sanitize_name(&program.title),
-        runtime = runtime_rel.display()
+        runtime = runtime_rel.display(),
+        interp = runtime_rel.with_file_name("recomp-interp").display()
     )
 }
 
@@ -249,9 +250,8 @@ fn emit_dispatch(functions: &[RustFunction], imports: &[crate::input::Import]) -
             import.address, import.name
         ));
     }
-    out.push_str(
-        "        _ => Err(recomp_runtime::RuntimeError::UnknownCallTarget { address }),\n",
-    );
+    // Code that was not recompiled ahead of time is decoded and interpreted on demand.
+    out.push_str("        _ => recomp_interp::run(ctx, address),\n");
     out.push_str("    }\n}\n");
     out
 }

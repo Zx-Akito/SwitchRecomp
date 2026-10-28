@@ -286,6 +286,19 @@ impl RuntimeMemory {
 
 static MEMORY: OnceLock<Mutex<RuntimeMemory>> = OnceLock::new();
 
+/// Base address and a copy of the bytes of the mapped region called `name`.
+pub fn region_snapshot(name: &str) -> Option<(u64, Vec<u8>)> {
+    with_memory(|memory| {
+        memory
+            .regions
+            .iter()
+            .find(|region| region.spec.name == name)
+            .map(|region| (region.spec.base, region.data.clone()))
+            .ok_or(MemoryStatus::Unmapped)
+    })
+    .ok()
+}
+
 pub fn init_memory(layout: MemoryLayout) -> Result<(), MemoryLayoutError> {
     let memory = RuntimeMemory::new(&layout)?;
     let _ = MEMORY.set(Mutex::new(memory));

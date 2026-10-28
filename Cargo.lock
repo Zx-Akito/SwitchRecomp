@@ -323,6 +323,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "recomp-interp"
+version = "0.1.0"
+dependencies = [
+ "recomp-pipeline",
+ "recomp-runtime",
+]
+
+[[package]]
 name = "recomp-isa"
 version = "0.1.0"
 dependencies = [

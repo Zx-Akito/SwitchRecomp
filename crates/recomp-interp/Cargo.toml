@@ -1,0 +1,9 @@
+[package]
+name = "recomp-interp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+recomp-pipeline = { path = "../recomp-pipeline" }
+recomp-runtime = { path = "../recomp-runtime" }

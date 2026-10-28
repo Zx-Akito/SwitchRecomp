@@ -26,8 +26,8 @@ pub use input_replay::{
 pub use memory::{
     init_memory, recomp_mem_load_u16, recomp_mem_load_u32, recomp_mem_load_u64, recomp_mem_load_u8,
     recomp_mem_store_u16, recomp_mem_store_u32, recomp_mem_store_u64, recomp_mem_store_u8,
-    MemoryInitSegment, MemoryLayout, MemoryLayoutError, MemoryPermissions, MemoryRegionSpec,
-    MemoryStatus, MemoryZeroSegment,
+    region_snapshot, MemoryInitSegment, MemoryLayout, MemoryLayoutError, MemoryPermissions,
+    MemoryRegionSpec, MemoryStatus, MemoryZeroSegment,
 };
 pub use recomp_gfx::{
     CommandStream, FrameDescriptor, GraphicsBackend, GraphicsError, GraphicsPresenter, StubBackend,
