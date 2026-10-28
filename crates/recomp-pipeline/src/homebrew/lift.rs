@@ -1558,6 +1558,39 @@ fn decode_simd_move(word: u32, state: &mut DecodeState, ops: &mut Vec<Op>) -> bo
         return true;
     }
 
+    // Advanced SIMD two-register misc (10000) and across lanes (11000):
+    // 0 Q U 01110 size 1 x000 opcode 10 Rn Rd.
+    if word & 0x9F2E_0C00 == 0x0E20_0800 {
+        let size = (word >> 22) & 3;
+        let across = (word >> 20) & 1 == 1;
+        let op = match (across, (word >> 12) & 0x1F, (word >> 29) & 1, size) {
+            (false, 0b00101, 0, 0) => "cnt",
+            (false, 0b00101, 1, 0) => "not",
+            (false, 0b01011, 0, _) => "abs",
+            (false, 0b01011, 1, _) => "neg",
+            (true, 0b00011, 1, 0..=2) => "uaddlv",
+            (true, 0b00011, 0, 0..=2) => "saddlv",
+            (true, 0b11011, 0, 0..=2) => "addv",
+            (true, 0b01010, 1, 0..=2) => "umaxv",
+            (true, 0b01010, 0, 0..=2) => "smaxv",
+            (true, 0b11010, 1, 0..=2) => "uminv",
+            (true, 0b11010, 0, 0..=2) => "sminv",
+            _ => return false,
+        };
+        if (size == 3 && !q) || (across && size == 2 && !q) {
+            return false; // reserved arrangements
+        }
+        ops.push(Op::VecOp {
+            func: op.to_string(),
+            dst: vd,
+            lhs: vn.clone(),
+            rhs: vn,
+            esize: 8 << size,
+            q,
+        });
+        return true;
+    }
+
     // Advanced SIMD three same (integer and bitwise): 0 Q U 01110 size 1 Rm opcode 1 Rn Rd.
     if word & 0x9F20_0400 == 0x0E20_0400 {
         let size = (word >> 22) & 3;
