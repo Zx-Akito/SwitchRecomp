@@ -3,7 +3,10 @@
 //! Recompiled code calls imports through placeholder addresses; the generated dispatch
 //! table routes those here. Arguments and results follow AAPCS64 in `ctx.x`.
 
-use crate::{mem_load_u64, mem_store_u64, Cpu, RuntimeError, RuntimeResult};
+use crate::{
+    mem_load_u64, mem_load_u8, mem_read_bytes, mem_store_u64, mem_write_bytes, Cpu, RuntimeError,
+    RuntimeResult,
+};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -110,6 +113,106 @@ pub fn call(ctx: &mut Cpu, symbol: &str) -> RuntimeResult<()> {
             }
             Ok(())
         }
+        // ponytail: guest code runs on one host thread, so mutexes never contend: lock
+        // and try-lock always succeed. Needs real host locks once guest threads run.
+        // nn::os::{Initialize,Finalize,Lock,Unlock}Mutex(MutexType*) and the C nnos* forms.
+        "_ZN2nn2os15InitializeMutexEPNS0_9MutexTypeEbi"
+        | "_ZN2nn2os13FinalizeMutexEPNS0_9MutexTypeE"
+        | "_ZN2nn2os9LockMutexEPNS0_9MutexTypeE"
+        | "_ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE"
+        | "nnosInitializeMutex"
+        | "nnosFinalizeMutex"
+        | "nnosLockMutex"
+        | "nnosUnlockMutex" => Ok(()),
+        // bool nn::os::TryLockMutex(MutexType*)
+        "_ZN2nn2os12TryLockMutexEPNS0_9MutexTypeE" => {
+            ctx.x[0] = 1;
+            Ok(())
+        }
+        // ponytail: semaphores never block on one host thread; acquiring an empty one
+        // returns immediately. Needs real counting once guest threads run.
+        "_ZN2nn2os19InitializeSemaphoreEPNS0_13SemaphoreTypeEii"
+        | "_ZN2nn2os17FinalizeSemaphoreEPNS0_13SemaphoreTypeE"
+        | "_ZN2nn2os16ReleaseSemaphoreEPNS0_13SemaphoreTypeEi"
+        | "_ZN2nn2os16ReleaseSemaphoreEPNS0_13SemaphoreTypeE"
+        | "_ZN2nn2os16AcquireSemaphoreEPNS0_13SemaphoreTypeE" => Ok(()),
+        "_ZN2nn2os19TryAcquireSemaphoreEPNS0_13SemaphoreTypeE"
+        | "_ZN2nn2os21TimedAcquireSemaphoreEPNS0_13SemaphoreTypeENS_8TimeSpanE" => {
+            ctx.x[0] = 1;
+            Ok(())
+        }
+        // C library (musl in the SDK). Pointers and sizes follow AAPCS64 in x0-x2.
+        "memset" => {
+            let (dst, value, len) = (ctx.x[0] as u64, ctx.x[1] as u8, ctx.x[2] as usize);
+            mem_write_bytes(dst, &vec![value; len])
+        }
+        "memcpy" | "memmove" => {
+            let (dst, src, len) = (ctx.x[0] as u64, ctx.x[1] as u64, ctx.x[2] as usize);
+            let bytes = mem_read_bytes(src, len)?;
+            mem_write_bytes(dst, &bytes)
+        }
+        "memcmp" => {
+            let len = ctx.x[2] as usize;
+            let a = mem_read_bytes(ctx.x[0] as u64, len)?;
+            let b = mem_read_bytes(ctx.x[1] as u64, len)?;
+            ctx.x[0] = byte_difference(&a, &b);
+            Ok(())
+        }
+        "memchr" => {
+            let (src, value, len) = (ctx.x[0] as u64, ctx.x[1] as u8, ctx.x[2] as usize);
+            let bytes = mem_read_bytes(src, len)?;
+            ctx.x[0] = bytes
+                .iter()
+                .position(|b| *b == value)
+                .map_or(0, |i| (src + i as u64) as i64);
+            Ok(())
+        }
+        "strlen" => {
+            ctx.x[0] = read_cstr(ctx.x[0] as u64, usize::MAX)?.len() as i64;
+            Ok(())
+        }
+        "strnlen" => {
+            ctx.x[0] = read_cstr(ctx.x[0] as u64, ctx.x[1] as usize)?.len() as i64;
+            Ok(())
+        }
+        "strcmp" | "strncmp" => {
+            let limit = if symbol == "strncmp" {
+                ctx.x[2] as usize
+            } else {
+                usize::MAX
+            };
+            let mut a = read_cstr(ctx.x[0] as u64, limit)?;
+            let mut b = read_cstr(ctx.x[1] as u64, limit)?;
+            // Compare including the terminator, within the limit.
+            a.push(0);
+            b.push(0);
+            let n = a.len().min(b.len()).min(limit);
+            ctx.x[0] = byte_difference(&a[..n], &b[..n]);
+            Ok(())
+        }
+        "strcpy" => {
+            let mut bytes = read_cstr(ctx.x[1] as u64, usize::MAX)?;
+            bytes.push(0);
+            mem_write_bytes(ctx.x[0] as u64, &bytes)
+        }
+        "strncpy" => {
+            let len = ctx.x[2] as usize;
+            let mut bytes = read_cstr(ctx.x[1] as u64, len)?;
+            bytes.resize(len, 0);
+            mem_write_bytes(ctx.x[0] as u64, &bytes)
+        }
+        "strchr" | "strrchr" => {
+            let (src, value) = (ctx.x[0] as u64, ctx.x[1] as u8);
+            let mut bytes = read_cstr(src, usize::MAX)?;
+            bytes.push(0);
+            let found = if symbol == "strchr" {
+                bytes.iter().position(|b| *b == value)
+            } else {
+                bytes.iter().rposition(|b| *b == value)
+            };
+            ctx.x[0] = found.map_or(0, |i| (src + i as u64) as i64);
+            Ok(())
+        }
         // Allocator registration and notification switches have no host-side effect yet.
         "_ZN2nn2fs12SetAllocatorEPFPvmEPFvS1_mE"
         | "_ZN5movie12SetAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_"
@@ -128,6 +231,27 @@ pub fn call(ctx: &mut Cpu, symbol: &str) -> RuntimeResult<()> {
     }
 }
 
+/// Bytes of the NUL-terminated string at `address`, at most `limit` of them.
+fn read_cstr(address: u64, limit: usize) -> RuntimeResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while bytes.len() < limit {
+        let byte = mem_load_u8(address + bytes.len() as u64)? as u8;
+        if byte == 0 {
+            break;
+        }
+        bytes.push(byte);
+    }
+    Ok(bytes)
+}
+
+/// C comparison result: difference of the first differing bytes as unsigned chars.
+fn byte_difference(a: &[u8], b: &[u8]) -> i64 {
+    a.iter()
+        .zip(b)
+        .find(|(x, y)| x != y)
+        .map_or(0, |(x, y)| *x as i64 - *y as i64)
+}
+
 fn system_tick() -> i64 {
     static START: OnceLock<Instant> = OnceLock::new();
     let elapsed = START.get_or_init(Instant::now).elapsed().as_nanos();
@@ -144,5 +268,39 @@ fn log_first_call(symbol: &str) {
     let mut seen = SEEN.get_or_init(Default::default).lock().unwrap();
     if seen.insert(symbol.to_string()) {
         eprintln!("[hle] {symbol}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{init_memory, MemoryLayout, MemoryPermissions, MemoryRegionSpec};
+
+    #[test]
+    fn libc_memory_and_string_functions() {
+        // Guest memory is process-global: use the memory tests' layout and stay clear of
+        // the addresses they touch.
+        let _ = init_memory(MemoryLayout::new(vec![
+            MemoryRegionSpec::new("data", 0x1000, 0x40, MemoryPermissions::read_write()),
+            MemoryRegionSpec::new("ro", 0x2000, 0x40, MemoryPermissions::read_only()),
+        ]));
+        let mut ctx = Cpu::default();
+        let mut libc = |name: &str, args: &[i64]| {
+            ctx.x[..args.len()].copy_from_slice(args);
+            call(&mut ctx, name).unwrap();
+            ctx.x[0]
+        };
+        libc("memset", &[0x1020, b'a' as i64, 4]);
+        libc("memset", &[0x1024, 0, 1]);
+        assert_eq!(libc("strlen", &[0x1020]), 4);
+        libc("strcpy", &[0x1028, 0x1020]);
+        assert_eq!(libc("strcmp", &[0x1020, 0x1028]), 0);
+        libc("memset", &[0x102B, b'b' as i64, 1]);
+        assert!(libc("strcmp", &[0x1020, 0x1028]) < 0);
+        assert_eq!(libc("strncmp", &[0x1020, 0x1028, 3]), 0);
+        assert_eq!(libc("strchr", &[0x1028, b'b' as i64]), 0x102B);
+        assert_eq!(libc("memchr", &[0x1020, b'z' as i64, 4]), 0);
+        libc("memcpy", &[0x1030, 0x1028, 5]);
+        assert_eq!(libc("memcmp", &[0x1030, 0x1028, 5]), 0);
     }
 }

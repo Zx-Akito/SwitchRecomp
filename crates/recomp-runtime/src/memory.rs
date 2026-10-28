@@ -483,6 +483,34 @@ pub(crate) fn mem_store_u64(address: u64, value: u64) -> Result<(), MemoryStatus
     mem_store(address, 8, value)
 }
 
+pub(crate) fn mem_read_bytes(address: u64, len: usize) -> Result<Vec<u8>, MemoryStatus> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    with_memory(|memory| {
+        let region = memory.resolve_region(address, len, AccessKind::Read, false)?;
+        let offset = (address - region.spec.base) as usize;
+        Ok(region.data[offset..offset + len].to_vec())
+    })
+}
+
+pub(crate) fn mem_write_bytes(address: u64, bytes: &[u8]) -> Result<(), MemoryStatus> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let status = with_memory_mut(|memory| {
+        let region = memory.resolve_region_mut(address, bytes.len(), AccessKind::Write, false)?;
+        let offset = (address - region.spec.base) as usize;
+        region.data[offset..offset + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    });
+    if status.is_ok() {
+        Ok(())
+    } else {
+        Err(status)
+    }
+}
+
 fn mem_load(address: u64, size: usize) -> Result<u64, MemoryStatus> {
     with_memory(|memory| memory.load(address, size))
 }

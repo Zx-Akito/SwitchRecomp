@@ -7,6 +7,7 @@ mod homebrew;
 mod input;
 mod input_replay;
 mod memory;
+pub mod simd;
 
 pub const ABI_VERSION: &str = "0.1.0";
 
@@ -130,6 +131,22 @@ pub fn apply_memory_image(
             address: 0,
             size: 0,
         }
+    })
+}
+
+pub fn mem_read_bytes(address: u64, len: usize) -> RuntimeResult<Vec<u8>> {
+    memory::mem_read_bytes(address, len).map_err(|status| RuntimeError::MemoryAccess {
+        status,
+        address,
+        size: len,
+    })
+}
+
+pub fn mem_write_bytes(address: u64, bytes: &[u8]) -> RuntimeResult<()> {
+    memory::mem_write_bytes(address, bytes).map_err(|status| RuntimeError::MemoryAccess {
+        status,
+        address,
+        size: bytes.len(),
     })
 }
 

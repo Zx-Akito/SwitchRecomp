@@ -192,6 +192,14 @@ enum Instr {
         bytes: u8,
     },
     ConstV(Reg, u128),
+    Vec {
+        f: rt::simd::VecFn,
+        dst: Reg,
+        lhs: Reg,
+        rhs: Reg,
+        esize: u32,
+        q: bool,
+    },
     VToX {
         dst: Reg,
         src: Reg,
@@ -433,6 +441,21 @@ fn compile_op(op: &Op, r: &mut Resolver) -> Result<Instr, String> {
         Op::ConstV { dst, lo, hi } => {
             Instr::ConstV(r.reg(dst), ((*hi as u128) << 64) | *lo as u128)
         }
+        Op::VecOp {
+            func,
+            dst,
+            lhs,
+            rhs,
+            esize,
+            q,
+        } => Instr::Vec {
+            f: rt::simd::by_name(func).ok_or_else(|| format!("unknown vector op {func}"))?,
+            dst: r.reg(dst),
+            lhs: r.reg(lhs),
+            rhs: r.reg(rhs),
+            esize: *esize as u32,
+            q: *q,
+        },
         Op::VToX {
             dst,
             src,
@@ -673,6 +696,23 @@ fn step(instr: &Instr, ctx: &mut Cpu, temps: &mut [u128]) -> RuntimeResult<()> {
             set_v(ctx, temps, dst, value);
         }
         Instr::ConstV(dst, value) => set_v(ctx, temps, dst, value),
+        Instr::Vec {
+            f,
+            dst,
+            lhs,
+            rhs,
+            esize,
+            q,
+        } => {
+            let value = f(
+                get_v(ctx, temps, lhs),
+                get_v(ctx, temps, rhs),
+                get_v(ctx, temps, dst),
+                esize,
+                q,
+            );
+            set_v(ctx, temps, dst, value);
+        }
         Instr::VToX {
             dst,
             src,

@@ -1558,6 +1558,50 @@ fn decode_simd_move(word: u32, state: &mut DecodeState, ops: &mut Vec<Op>) -> bo
         return true;
     }
 
+    // Advanced SIMD three same (integer and bitwise): 0 Q U 01110 size 1 Rm opcode 1 Rn Rd.
+    if word & 0x9F20_0400 == 0x0E20_0400 {
+        let size = (word >> 22) & 3;
+        let u = (word >> 29) & 1;
+        let op = match ((word >> 11) & 0x1F, u, size) {
+            (0b10000, 0, _) => "add",
+            (0b10000, 1, _) => "sub",
+            (0b10011, 0, 0..=2) => "mul",
+            (0b00011, 0, 0) => "and",
+            (0b00011, 0, 1) => "bic",
+            (0b00011, 0, 2) => "orr",
+            (0b00011, 0, 3) => "orn",
+            (0b00011, 1, 0) => "eor",
+            (0b00011, 1, 1) => "bsl",
+            (0b00011, 1, 2) => "bit",
+            (0b00011, 1, 3) => "bif",
+            (0b10001, 0, _) => "cmtst",
+            (0b10001, 1, _) => "cmeq",
+            (0b00110, 0, _) => "cmgt",
+            (0b00110, 1, _) => "cmhi",
+            (0b00111, 0, _) => "cmge",
+            (0b00111, 1, _) => "cmhs",
+            (0b01100, 0, 0..=2) => "smax",
+            (0b01100, 1, 0..=2) => "umax",
+            (0b01101, 0, 0..=2) => "smin",
+            (0b01101, 1, 0..=2) => "umin",
+            _ => return false,
+        };
+        if size == 3 && !q && !matches!((word >> 11) & 0x1F, 0b00011) {
+            return false; // 64-bit lanes need the full register
+        }
+        let rm = ((word >> 16) & 0x1F) as u8;
+        // ORR Vd, Vn, Vn is MOV (vector), handled below with the same result.
+        ops.push(Op::VecOp {
+            func: op.to_string(),
+            dst: vd,
+            lhs: vn,
+            rhs: format!("v{rm}"),
+            esize: 8 << size,
+            q,
+        });
+        return true;
+    }
+
     // UMOV / INS (general) / DUP (general): 0 Q 0 01110000 imm5 0 imm4 1 Rn Rd.
     if word & 0x9FE0_8400 == 0x0E00_0400 {
         let imm5 = (word >> 16) & 0x1F;

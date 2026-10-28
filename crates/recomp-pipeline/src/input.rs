@@ -223,6 +223,16 @@ pub enum Op {
         lo: u64,
         hi: u64,
     },
+    /// Advanced SIMD lane operation `func` from `recomp_runtime::simd`, applied to
+    /// (`lhs`, `rhs`, previous `dst`) with `esize`-bit lanes over 64 or 128 (`q`) bits.
+    VecOp {
+        func: String,
+        dst: String,
+        lhs: String,
+        rhs: String,
+        esize: u8,
+        q: bool,
+    },
     /// Reads lane `lane` (`bits` wide, zero-extended) of a SIMD&FP register into a GPR.
     VToX {
         dst: String,

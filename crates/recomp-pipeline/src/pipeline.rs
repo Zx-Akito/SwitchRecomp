@@ -661,6 +661,24 @@ fn translate_op(
                 ));
             }
         }
+        Op::VecOp {
+            func,
+            dst,
+            lhs,
+            rhs,
+            esize,
+            q,
+        } => {
+            track_reg(regs, dst);
+            track_reg(regs, lhs);
+            track_reg(regs, rhs);
+            if !func.chars().all(|c| c.is_ascii_lowercase()) {
+                return Err(PipelineError::Module(format!("invalid vector op {func}")));
+            }
+            lines.push(format!(
+                "{dst} = recomp_runtime::simd::{func}({lhs}, {rhs}, {dst}, {esize}, {q});"
+            ));
+        }
         Op::ConstV { dst, lo, hi } => {
             track_reg(regs, dst);
             lines.push(format!(
