@@ -223,6 +223,14 @@ pub enum Op {
         lo: u64,
         hi: u64,
     },
+    /// Integer operation `func` from `recomp_runtime::alu`, applied to (`lhs`, `rhs`,
+    /// previous `dst`).
+    IntOp {
+        func: String,
+        dst: String,
+        lhs: String,
+        rhs: String,
+    },
     /// Advanced SIMD lane operation `func` from `recomp_runtime::simd`, applied to
     /// (`lhs`, `rhs`, previous `dst`) with `esize`-bit lanes over 64 or 128 (`q`) bits.
     VecOp {

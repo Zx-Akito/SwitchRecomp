@@ -1213,12 +1213,25 @@ fn decode_integer_alu(word: u32, state: &mut DecodeState, ops: &mut Vec<Op>) -> 
         return true;
     }
 
-    // Bitfield SBFM/UBFM: sf opc 100110 N immr imms Rn Rd (BFM is not handled).
+    // Bitfield SBFM/BFM/UBFM: sf opc 100110 N immr imms Rn Rd.
     if (word >> 23) & 0x3F == 0b10_0110 {
         let opc = (word >> 29) & 3;
         let (n, immr, imms) = ((word >> 22) & 1, (word >> 16) & 0x3F, (word >> 10) & 0x3F);
-        if opc == 1 || opc == 3 || n == is_32 as u32 || immr >= width || imms >= width {
+        if opc == 3 || n == is_32 as u32 || immr >= width || imms >= width {
             return false;
+        }
+        if opc == 1 {
+            // BFM (BFI/BFXIL): inserts into the previous destination.
+            let src = src_zr(rn, state, ops);
+            let fields = const_temp(((width << 16) | (immr << 8) | imms) as i64, state, ops);
+            let dst = dst_zr(rd, state);
+            ops.push(Op::IntOp {
+                func: "bfm".to_string(),
+                dst,
+                lhs: src,
+                rhs: fields,
+            });
+            return true;
         }
         let signed = opc == 0;
         let src = src_zr(rn, state, ops);
@@ -1328,6 +1341,87 @@ fn decode_integer_alu(word: u32, state: &mut DecodeState, ops: &mut Vec<Op>) -> 
         return true;
     }
 
+    // Data-processing (2 source): sf 0 0 11010110 Rm opcode Rn Rd.
+    if word & 0x7FE0_0000 == 0x1AC0_0000 {
+        let func = match ((word >> 10) & 0x3F, is_32) {
+            (0b000010, false) => "udiv",
+            (0b000011, false) => "sdiv",
+            (0b000010, true) => "udiv32",
+            (0b000011, true) => "sdiv32",
+            (0b001000, false) => "lslv",
+            (0b001001, false) => "lsrv",
+            (0b001010, false) => "asrv",
+            (0b001011, false) => "rorv",
+            (0b001000, true) => "lslv32",
+            (0b001001, true) => "lsrv32",
+            (0b001010, true) => "asrv32",
+            (0b001011, true) => "rorv32",
+            _ => return false, // CRC32 and pointer authentication
+        };
+        let lhs = src_zr(rn, state, ops);
+        let rhs = src_zr(rm, state, ops);
+        let dst = dst_zr(rd, state);
+        ops.push(Op::IntOp {
+            func: func.to_string(),
+            dst,
+            lhs,
+            rhs,
+        });
+        return true;
+    }
+
+    // Data-processing (1 source): sf 1 0 11010110 00000 opcode Rn Rd.
+    if word & 0x7FFF_0000 == 0x5AC0_0000 {
+        let (func, width_arg) = match ((word >> 10) & 0x3F, is_32) {
+            (0b000000, false) => ("rbit", 0),
+            (0b000000, true) => ("rbit32", 0),
+            (0b000001, _) => ("rev16", width),
+            (0b000010, true) => ("rev32", 32),
+            (0b000010, false) => ("rev32", 64),
+            (0b000011, false) => ("rev", 0),
+            (0b000100, false) => ("clz", 0),
+            (0b000100, true) => ("clz32", 0),
+            (0b000101, false) => ("cls", 0),
+            (0b000101, true) => ("cls32", 0),
+            _ => return false,
+        };
+        let lhs = src_zr(rn, state, ops);
+        let rhs = const_temp(width_arg as i64, state, ops);
+        let dst = dst_zr(rd, state);
+        ops.push(Op::IntOp {
+            func: func.to_string(),
+            dst,
+            lhs,
+            rhs,
+        });
+        return true;
+    }
+
+    // MRS of the registers user code reads: TPIDR_EL0, CNTVCT_EL0, CNTFRQ_EL0.
+    if matches!(word & 0xFFFF_FFE0, 0xD53B_D040 | 0xD53B_E040 | 0xD53B_E000) {
+        let dst = dst_zr(rd, state);
+        if word & 0xFFFF_FFE0 == 0xD53B_E000 {
+            ops.push(Op::ConstI64 {
+                dst,
+                imm: 19_200_000,
+            });
+        } else {
+            let zero = const_temp(0, state, ops);
+            let func = if word & 0xFFFF_FFE0 == 0xD53B_D040 {
+                "tpidr"
+            } else {
+                "cntvct"
+            };
+            ops.push(Op::IntOp {
+                func: func.to_string(),
+                dst,
+                lhs: zero.clone(),
+                rhs: zero,
+            });
+        }
+        return true;
+    }
+
     // CCMP/CCMN (register or immediate): sf op 1 11010010 Rm|imm5 cond i 0 Rn 0 nzcv.
     if word & 0x3FE0_0410 == 0x3A40_0000 {
         let Some(cond) = cond_code(((word >> 12) & 0xF) as u8) else {
@@ -1358,7 +1452,20 @@ fn decode_integer_alu(word: u32, state: &mut DecodeState, ops: &mut Vec<Op>) -> 
             (0, _) => None,
             (1, false) => Some(true),
             (5, false) => Some(false),
-            _ => return false, // SMULH/UMULH and reserved
+            (2 | 6, false) => {
+                let lhs = src_zr(rn, state, ops);
+                let rhs = src_zr(rm, state, ops);
+                let dst = dst_zr(rd, state);
+                let func = if op31 == 2 { "smulh" } else { "umulh" };
+                ops.push(Op::IntOp {
+                    func: func.to_string(),
+                    dst,
+                    lhs,
+                    rhs,
+                });
+                return true;
+            }
+            _ => return false,
         };
         let ra = ((word >> 10) & 0x1F) as u8;
         let mut lhs = src_zr(rn, state, ops);

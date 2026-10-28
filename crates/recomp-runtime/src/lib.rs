@@ -1,5 +1,6 @@
 use std::fmt;
 
+pub mod alu;
 mod audio;
 mod boot;
 pub mod hle;

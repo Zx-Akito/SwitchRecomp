@@ -661,6 +661,22 @@ fn translate_op(
                 ));
             }
         }
+        Op::IntOp {
+            func,
+            dst,
+            lhs,
+            rhs,
+        } => {
+            track_reg(regs, dst);
+            track_reg(regs, lhs);
+            track_reg(regs, rhs);
+            if !func.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(PipelineError::Module(format!("invalid integer op {func}")));
+            }
+            lines.push(format!(
+                "{dst} = recomp_runtime::alu::{func}({lhs}, {rhs}, {dst});"
+            ));
+        }
         Op::VecOp {
             func,
             dst,

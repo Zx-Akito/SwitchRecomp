@@ -192,6 +192,12 @@ enum Instr {
         bytes: u8,
     },
     ConstV(Reg, u128),
+    Int {
+        f: rt::alu::IntFn,
+        dst: Reg,
+        lhs: Reg,
+        rhs: Reg,
+    },
     Vec {
         f: rt::simd::VecFn,
         dst: Reg,
@@ -441,6 +447,17 @@ fn compile_op(op: &Op, r: &mut Resolver) -> Result<Instr, String> {
         Op::ConstV { dst, lo, hi } => {
             Instr::ConstV(r.reg(dst), ((*hi as u128) << 64) | *lo as u128)
         }
+        Op::IntOp {
+            func,
+            dst,
+            lhs,
+            rhs,
+        } => Instr::Int {
+            f: rt::alu::by_name(func).ok_or_else(|| format!("unknown integer op {func}"))?,
+            dst: r.reg(dst),
+            lhs: r.reg(lhs),
+            rhs: r.reg(rhs),
+        },
         Op::VecOp {
             func,
             dst,
@@ -696,6 +713,14 @@ fn step(instr: &Instr, ctx: &mut Cpu, temps: &mut [u128]) -> RuntimeResult<()> {
             set_v(ctx, temps, dst, value);
         }
         Instr::ConstV(dst, value) => set_v(ctx, temps, dst, value),
+        Instr::Int { f, dst, lhs, rhs } => {
+            let value = f(
+                get(ctx, temps, lhs),
+                get(ctx, temps, rhs),
+                get(ctx, temps, dst),
+            );
+            set(ctx, temps, dst, value);
+        }
         Instr::Vec {
             f,
             dst,

@@ -16,6 +16,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 pub const HLE_SCRATCH_BASE: u64 = 0x3_0000_0000;
 /// nn::os::ThreadType returned by GetCurrentThread for the main thread.
 const MAIN_THREAD: u64 = HLE_SCRATCH_BASE;
+/// Thread-local storage of the main thread (TPIDR_EL0), 0x200 zeroed bytes.
+pub const MAIN_THREAD_TLS: u64 = HLE_SCRATCH_BASE + 0x1000;
 /// Switch system tick frequency (19.2 MHz).
 const TICK_HZ: u128 = 19_200_000;
 const RESULT_SUCCESS: i64 = 0;
@@ -252,7 +254,7 @@ fn byte_difference(a: &[u8], b: &[u8]) -> i64 {
         .map_or(0, |(x, y)| *x as i64 - *y as i64)
 }
 
-fn system_tick() -> i64 {
+pub(crate) fn system_tick() -> i64 {
     static START: OnceLock<Instant> = OnceLock::new();
     let elapsed = START.get_or_init(Instant::now).elapsed().as_nanos();
     (elapsed * TICK_HZ / 1_000_000_000) as i64
