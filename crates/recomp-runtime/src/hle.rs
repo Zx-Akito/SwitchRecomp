@@ -3,7 +3,7 @@
 //! Recompiled code calls imports through placeholder addresses; the generated dispatch
 //! table routes those here. Arguments and results follow AAPCS64 in `ctx.x`.
 
-use crate::{mem_store_u64, Cpu, RuntimeError, RuntimeResult};
+use crate::{mem_load_u64, mem_store_u64, Cpu, RuntimeError, RuntimeResult};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -16,6 +16,24 @@ const MAIN_THREAD: u64 = HLE_SCRATCH_BASE;
 /// Switch system tick frequency (19.2 MHz).
 const TICK_HZ: u128 = 19_200_000;
 const RESULT_SUCCESS: i64 = 0;
+
+/// Entry into recompiled code by guest address (the generated `dispatch`).
+pub type GuestCall = fn(&mut Cpu, u64) -> RuntimeResult<()>;
+
+static GUEST_DISPATCH: OnceLock<GuestCall> = OnceLock::new();
+
+/// Registers the generated dispatch table so emulated functions can call back into the
+/// guest (callbacks, initializers, thread entry points).
+pub fn set_guest_dispatch(dispatch: GuestCall) {
+    let _ = GUEST_DISPATCH.set(dispatch);
+}
+
+fn call_guest(ctx: &mut Cpu, address: u64) -> RuntimeResult<()> {
+    let dispatch = GUEST_DISPATCH
+        .get()
+        .ok_or(RuntimeError::UnknownCallTarget { address })?;
+    dispatch(ctx, address)
+}
 
 /// With `RECOMP_HLE_LENIENT=1`, unknown imports are logged and return 0 instead of
 /// stopping execution. Results are not trustworthy then; it only maps which imports a
@@ -77,6 +95,18 @@ pub fn call(ctx: &mut Cpu, symbol: &str) -> RuntimeResult<()> {
                 .map_or(0, |d| d.as_secs());
             mem_store_u64(ctx.x[0] as u64, now)?;
             ctx.x[0] = RESULT_SUCCESS;
+            Ok(())
+        }
+        // void std::__1::__call_once(volatile unsigned long& flag, void* arg, void (*func)(void*))
+        // libc++ flag states: 0 not run, 1 running, ~0 done.
+        "_ZNSt3__111__call_onceERVmPvPFvS2_E" => {
+            let (flag, arg, func) = (ctx.x[0] as u64, ctx.x[1], ctx.x[2] as u64);
+            if mem_load_u64(flag)? != u64::MAX {
+                mem_store_u64(flag, 1)?;
+                ctx.x[0] = arg;
+                call_guest(ctx, func)?;
+                mem_store_u64(flag, u64::MAX)?;
+            }
             Ok(())
         }
         // Allocator registration and notification switches have no host-side effect yet.

@@ -202,6 +202,7 @@ fn emit_main_rs(program: &RustProgram) -> String {
     emit_memory_layout_init(&mut out, &program.memory_layout);
     emit_memory_image_init(&mut out, program.memory_image.as_ref());
     out.push_str("    let mut ctx = recomp_runtime::Cpu::default();\n");
+    out.push_str("    recomp_runtime::hle::set_guest_dispatch(dispatch);\n");
     if let Some(stack) = program
         .memory_layout
         .regions
