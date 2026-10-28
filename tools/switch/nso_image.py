@@ -123,7 +123,10 @@ def main():
                          "permissions": permissions, "init_path": f"{name}.bin",
                          "init_size": len(init), "zero_fill": end - start > len(init)})
         regions.append((name, start, end - start, permissions))
-    for name, base, size in (HEAP, STACK, HLE):
+    # Data imports (stdout, typeinfo vtables, ...) are read at their placeholder address.
+    imports_size = max(len(imports) * IMPORT_STRIDE, 0x1000)
+    imports_size = (imports_size + 0xFFF) & ~0xFFF
+    for name, base, size in (HEAP, STACK, HLE, ("imports", IMPORT_BASE, imports_size)):
         regions.append((name, base, size, {"read": True, "write": True, "execute": False}))
 
     (out_dir / "segments.json").write_text(json.dumps(segments, indent=2))

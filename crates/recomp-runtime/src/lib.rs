@@ -3,11 +3,13 @@ use std::fmt;
 pub mod alu;
 mod audio;
 mod boot;
+mod fs;
 pub mod hle;
 mod homebrew;
 mod input;
 mod input_replay;
 mod memory;
+mod printf;
 pub mod simd;
 
 pub const ABI_VERSION: &str = "0.1.0";

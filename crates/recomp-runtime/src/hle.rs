@@ -3,6 +3,7 @@
 //! Recompiled code calls imports through placeholder addresses; the generated dispatch
 //! table routes those here. Arguments and results follow AAPCS64 in `ctx.x`.
 
+use crate::printf;
 use crate::{
     map_region, mem_load_u64, mem_load_u8, mem_read_bytes, mem_store_u64, mem_write_bytes,
     unmap_region, Cpu, MemoryPermissions, MemoryRegionSpec, RuntimeError, RuntimeResult,
@@ -19,6 +20,8 @@ pub const HLE_SCRATCH_BASE: u64 = 0x3_0000_0000;
 const MAIN_THREAD: u64 = HLE_SCRATCH_BASE;
 /// Thread-local storage of the main thread (TPIDR_EL0), 0x200 zeroed bytes.
 pub const MAIN_THREAD_TLS: u64 = HLE_SCRATCH_BASE + 0x1000;
+/// Empty, NULL-terminated argv returned by nn::os::GetHostArgv.
+const HOST_ARGV: u64 = HLE_SCRATCH_BASE + 0x2000;
 /// Switch system tick frequency (19.2 MHz).
 const TICK_HZ: u128 = 19_200_000;
 const RESULT_SUCCESS: i64 = 0;
@@ -50,6 +53,9 @@ pub fn call_guest(ctx: &mut Cpu, address: u64) -> RuntimeResult<()> {
 /// title reaches.
 pub fn call(ctx: &mut Cpu, symbol: &str) -> RuntimeResult<()> {
     log_first_call(symbol);
+    if let Some(result) = crate::fs::call(ctx, symbol) {
+        return result;
+    }
     match symbol {
         // void nn::oe::SetCpuBoostMode(nn::oe::CpuBoostMode): host clocks are not modelled.
         "_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE" => Ok(()),
@@ -145,6 +151,69 @@ pub fn call(ctx: &mut Cpu, symbol: &str) -> RuntimeResult<()> {
         "_ZN2nn2os19TryAcquireSemaphoreEPNS0_13SemaphoreTypeE"
         | "_ZN2nn2os21TimedAcquireSemaphoreEPNS0_13SemaphoreTypeENS_8TimeSpanE" => {
             ctx.x[0] = 1;
+            Ok(())
+        }
+        // int nn::os::GetHostArgc() / char** nn::os::GetHostArgv(): no host arguments.
+        "_ZN2nn2os11GetHostArgcEv" => {
+            ctx.x[0] = 0;
+            Ok(())
+        }
+        "_ZN2nn2os11GetHostArgvEv" => {
+            ctx.x[0] = HOST_ARGV as i64;
+            Ok(())
+        }
+        // Itanium C++ ABI static-local guards: byte 0 of the guard marks "initialized".
+        // ponytail: no waiting for a concurrent initializer (one host thread).
+        "__cxa_guard_acquire" => {
+            ctx.x[0] = (mem_load_u8(ctx.x[0] as u64)? == 0) as i64;
+            Ok(())
+        }
+        "__cxa_guard_release" => mem_write_bytes(ctx.x[0] as u64, &[1]),
+        "__cxa_guard_abort" => Ok(()),
+        // printf family.
+        "vsnprintf" | "snprintf" => {
+            let (buf, len) = (ctx.x[0] as u64, ctx.x[1] as usize);
+            let text = if symbol == "vsnprintf" {
+                printf::format(ctx.x[2] as u64, &mut printf::VaList::read(ctx.x[3] as u64)?)?
+            } else {
+                printf::format(ctx.x[2] as u64, &mut printf::RegisterArgs::new(ctx, 3))?
+            };
+            if len > 0 {
+                let mut out = text[..text.len().min(len - 1)].to_vec();
+                out.push(0);
+                mem_write_bytes(buf, &out)?;
+            }
+            ctx.x[0] = text.len() as i64;
+            Ok(())
+        }
+        "sprintf" => {
+            let mut text = printf::format(ctx.x[1] as u64, &mut printf::RegisterArgs::new(ctx, 2))?;
+            let len = text.len();
+            text.push(0);
+            mem_write_bytes(ctx.x[0] as u64, &text)?;
+            ctx.x[0] = len as i64;
+            Ok(())
+        }
+        "printf" | "fprintf" | "vfprintf" | "puts" => {
+            let (stream, mut text) = match symbol {
+                "printf" => (0, printf::format(ctx.x[0] as u64, &mut printf::RegisterArgs::new(ctx, 1))?),
+                "fprintf" => (
+                    ctx.x[0] as u64,
+                    printf::format(ctx.x[1] as u64, &mut printf::RegisterArgs::new(ctx, 2))?,
+                ),
+                "vfprintf" => (
+                    ctx.x[0] as u64,
+                    printf::format(ctx.x[1] as u64, &mut printf::VaList::read(ctx.x[2] as u64)?)?,
+                ),
+                _ => (0, read_cstr(ctx.x[0] as u64, usize::MAX)?),
+            };
+            if symbol == "puts" {
+                text.push(b'\n');
+            }
+            if !crate::fs::write_stream(stream, &text) {
+                eprint!("[guest] {}", String::from_utf8_lossy(&text));
+            }
+            ctx.x[0] = text.len() as i64;
             Ok(())
         }
         // C library (musl in the SDK). Pointers and sizes follow AAPCS64 in x0-x2.
