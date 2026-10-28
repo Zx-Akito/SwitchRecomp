@@ -286,6 +286,53 @@ impl RuntimeMemory {
 
 static MEMORY: OnceLock<Mutex<RuntimeMemory>> = OnceLock::new();
 
+/// Maps a zero-filled region at run time (guest virtual-memory APIs). The backing is
+/// allocated zeroed, which the host commits lazily, so large reservations are cheap.
+pub(crate) fn map_region(spec: MemoryRegionSpec) -> Result<(), MemoryStatus> {
+    let status = with_memory_mut(|memory| {
+        let end = spec
+            .base
+            .checked_add(spec.size)
+            .ok_or(MemoryStatus::Unmapped)?;
+        let overlaps = memory
+            .regions
+            .iter()
+            .any(|r| spec.base < r.spec.base + r.spec.size && r.spec.base < end);
+        if spec.size == 0 || overlaps {
+            return Err(MemoryStatus::Unmapped);
+        }
+        let data = vec![0; spec.size as usize];
+        memory.regions.push(MemoryRegion {
+            spec: spec.clone(),
+            data,
+        });
+        Ok(())
+    });
+    if status.is_ok() {
+        Ok(())
+    } else {
+        Err(status)
+    }
+}
+
+/// Removes the region that starts at `base`.
+pub(crate) fn unmap_region(base: u64) -> Result<(), MemoryStatus> {
+    let status = with_memory_mut(|memory| {
+        let index = memory
+            .regions
+            .iter()
+            .position(|r| r.spec.base == base)
+            .ok_or(MemoryStatus::Unmapped)?;
+        memory.regions.remove(index);
+        Ok(())
+    });
+    if status.is_ok() {
+        Ok(())
+    } else {
+        Err(status)
+    }
+}
+
 /// Base address and a copy of the bytes of the mapped region called `name`.
 pub fn region_snapshot(name: &str) -> Option<(u64, Vec<u8>)> {
     with_memory(|memory| {
@@ -541,6 +588,19 @@ mod tests {
         mem_store_u32(0x1004, 0xDEADBEEF).expect("store");
         let value = mem_load_u32(0x1004).expect("load");
         assert_eq!(value, 0xDEADBEEF);
+    }
+
+    #[test]
+    fn regions_map_and_unmap_at_run_time() {
+        init_memory(test_layout()).expect("init memory");
+        let spec =
+            MemoryRegionSpec::new("dynamic", 0x5000, 0x1000, MemoryPermissions::read_write());
+        map_region(spec.clone()).expect("map");
+        mem_store_u64(0x5ff8, 0x1122_3344_5566_7788).expect("store into mapped region");
+        assert_eq!(mem_load_u64(0x5ff8).expect("load"), 0x1122_3344_5566_7788);
+        assert!(map_region(spec).is_err(), "overlapping map is rejected");
+        unmap_region(0x5000).expect("unmap");
+        assert_eq!(mem_load_u64(0x5ff8).unwrap_err(), MemoryStatus::Unmapped);
     }
 
     #[test]

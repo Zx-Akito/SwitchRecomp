@@ -4,10 +4,11 @@
 //! table routes those here. Arguments and results follow AAPCS64 in `ctx.x`.
 
 use crate::{
-    mem_load_u64, mem_load_u8, mem_read_bytes, mem_store_u64, mem_write_bytes, Cpu, RuntimeError,
-    RuntimeResult,
+    map_region, mem_load_u64, mem_load_u8, mem_read_bytes, mem_store_u64, mem_write_bytes,
+    unmap_region, Cpu, MemoryPermissions, MemoryRegionSpec, RuntimeError, RuntimeResult,
 };
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +22,9 @@ pub const MAIN_THREAD_TLS: u64 = HLE_SCRATCH_BASE + 0x1000;
 /// Switch system tick frequency (19.2 MHz).
 const TICK_HZ: u128 = 19_200_000;
 const RESULT_SUCCESS: i64 = 0;
+/// Guest virtual address space handed out by nn::os::AllocateAddressRegion.
+const ADDRESS_REGION_BASE: u64 = 0x10_0000_0000;
+const ADDRESS_REGION_ALIGN: u64 = 0x20_0000;
 
 /// Entry into recompiled code by guest address (the generated `dispatch`).
 pub type GuestCall = fn(&mut Cpu, u64) -> RuntimeResult<()>;
@@ -213,6 +217,39 @@ pub fn call(ctx: &mut Cpu, symbol: &str) -> RuntimeResult<()> {
                 bytes.iter().rposition(|b| *b == value)
             };
             ctx.x[0] = found.map_or(0, |i| (src + i as u64) as i64);
+            Ok(())
+        }
+        // nn::Result nn::os::AllocateAddressRegion(uintptr_t* out, size_t size)
+        // ponytail: reservations are mapped read/write immediately (the host commits
+        // pages lazily), so AllocateMemoryPages / SetMemoryPermission are no-ops and
+        // freed pages are not returned until the whole region is freed.
+        "_ZN2nn2os21AllocateAddressRegionEPmm" => {
+            static NEXT: AtomicU64 = AtomicU64::new(ADDRESS_REGION_BASE);
+            let size = (ctx.x[1] as u64).next_multiple_of(ADDRESS_REGION_ALIGN);
+            let base = NEXT.fetch_add(size + ADDRESS_REGION_ALIGN, Ordering::Relaxed);
+            map_region(MemoryRegionSpec::new(
+                &format!("address-region-{base:#x}"),
+                base,
+                size,
+                MemoryPermissions::read_write(),
+            ))?;
+            eprintln!("[hle] address region {base:#x} size {size:#x}");
+            mem_store_u64(ctx.x[0] as u64, base)?;
+            ctx.x[0] = RESULT_SUCCESS;
+            Ok(())
+        }
+        // nn::Result nn::os::FreeAddressRegion(uintptr_t)
+        "_ZN2nn2os17FreeAddressRegionEm" => {
+            unmap_region(ctx.x[0] as u64)?;
+            ctx.x[0] = RESULT_SUCCESS;
+            Ok(())
+        }
+        // nn::Result nn::os::{Allocate,Free}MemoryPages(uintptr_t, size_t) and
+        // SetMemoryPermission(uintptr_t, size_t, MemoryPermission)
+        "_ZN2nn2os19AllocateMemoryPagesEmm"
+        | "_ZN2nn2os15FreeMemoryPagesEmm"
+        | "_ZN2nn2os19SetMemoryPermissionEmmNS0_16MemoryPermissionE" => {
+            ctx.x[0] = RESULT_SUCCESS;
             Ok(())
         }
         // Allocator registration and notification switches have no host-side effect yet.

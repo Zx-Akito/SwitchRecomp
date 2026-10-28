@@ -135,6 +135,23 @@ pub fn apply_memory_image(
     })
 }
 
+pub fn map_region(spec: MemoryRegionSpec) -> RuntimeResult<()> {
+    let (address, size) = (spec.base, spec.size as usize);
+    memory::map_region(spec).map_err(|status| RuntimeError::MemoryAccess {
+        status,
+        address,
+        size,
+    })
+}
+
+pub fn unmap_region(base: u64) -> RuntimeResult<()> {
+    memory::unmap_region(base).map_err(|status| RuntimeError::MemoryAccess {
+        status,
+        address: base,
+        size: 0,
+    })
+}
+
 pub fn mem_read_bytes(address: u64, len: usize) -> RuntimeResult<Vec<u8>> {
     memory::mem_read_bytes(address, len).map_err(|status| RuntimeError::MemoryAccess {
         status,
