@@ -33,6 +33,19 @@ Setup: `python3 -m venv .venv && .venv/bin/pip install -r tools/switch/requireme
      --mode partial --entry nnMain --entry-address 0x<nnMain>
    ```
 
+6. Lay out the module's memory as rtld would (segments at their load offsets, RELATIVE,
+   RELR and ABS64 relocations applied, imports bound to placeholder addresses listed in
+   `imports.tsv`):
+
+   ```sh
+   .venv/bin/python -I tools/switch/nso_image.py exefs/main nso/main image-main
+   ```
+
+   Put `image-main/segments.json` into the lifted `module.json` as `"segments"` (with
+   `init_path` relative to that file) and `image-main/memory_layout.toml` into the title
+   config, then run `recomp run`. An `UnknownCallTarget` at `0xf000_0000` and above is a
+   call to the import listed at that address in `imports.tsv`.
+
 ## `difftest/`: lifter differential test
 
 `tools/difftest/run.sh` runs `seq.s` on the host CPU and through intake, lift and Rust
