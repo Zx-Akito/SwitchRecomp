@@ -434,6 +434,38 @@ fn translate_op(
             track_reg(regs, rhs);
             lines.push(format!("{dst} = {lhs} ^ {rhs};"));
         }
+        Op::CondCmpI64 {
+            cond,
+            lhs,
+            rhs,
+            negate,
+            nzcv,
+        } => {
+            let compare = if *negate {
+                Op::CmnI64 {
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                }
+            } else {
+                Op::CmpI64 {
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                }
+            };
+            let mut inner = Vec::new();
+            translate_op(&compare, config, regs, &mut inner, needs_flags)?;
+            let expr = render_cond_expr(cond).ok_or_else(|| {
+                PipelineError::Module(format!("unsupported ccmp condition {cond}"))
+            })?;
+            lines.push(format!(
+                "if {expr} {{ {} }} else {{ flag_n = {}; flag_z = {}; flag_c = {}; flag_v = {}; }}",
+                inner.join(" "),
+                nzcv & 8 != 0,
+                nzcv & 4 != 0,
+                nzcv & 2 != 0,
+                nzcv & 1 != 0
+            ));
+        }
         Op::CmpI64 { lhs, rhs } => {
             track_reg(regs, lhs);
             track_reg(regs, rhs);

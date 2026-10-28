@@ -113,6 +113,15 @@ pub enum Op {
         lhs: String,
         rhs: String,
     },
+    /// CCMP/CCMN: if `cond` holds, set flags from `lhs - rhs` (or `lhs + rhs` when `negate`),
+    /// otherwise set NZCV to the immediate `nzcv`.
+    CondCmpI64 {
+        cond: String,
+        lhs: String,
+        rhs: String,
+        negate: bool,
+        nzcv: u8,
+    },
     SelectI64 {
         dst: String,
         cond: String,

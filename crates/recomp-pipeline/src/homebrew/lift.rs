@@ -1289,6 +1289,29 @@ fn decode_integer_alu(word: u32, state: &mut DecodeState, ops: &mut Vec<Op>) -> 
         return true;
     }
 
+    // CCMP/CCMN (register or immediate): sf op 1 11010010 Rm|imm5 cond i 0 Rn 0 nzcv.
+    if word & 0x3FE0_0410 == 0x3A40_0000 {
+        let Some(cond) = cond_code(((word >> 12) & 0xF) as u8) else {
+            return false;
+        };
+        let lhs = src_zr(rn, state, ops);
+        let rhs = if (word >> 11) & 1 == 1 {
+            const_temp(rm as i64, state, ops)
+        } else {
+            src_zr(rm, state, ops)
+        };
+        let lhs = flag_operand(&lhs, is_32, state, ops);
+        let rhs = flag_operand(&rhs, is_32, state, ops);
+        ops.push(Op::CondCmpI64 {
+            cond: cond.to_string(),
+            lhs,
+            rhs,
+            negate: (word >> 30) & 1 == 0,
+            nzcv: (word & 0xF) as u8,
+        });
+        return true;
+    }
+
     // Multiply-add: sf 00 11011 op31 Rm o0 Ra Rn Rd (MADD/MSUB, SMADDL/UMADDL and subtracting forms).
     if word & 0x7F00_0000 == 0x1B00_0000 {
         let op31 = (word >> 21) & 7;
