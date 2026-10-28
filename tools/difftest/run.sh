@@ -16,7 +16,7 @@ cargo build -q --release -p recomp-cli --manifest-path "$ROOT/Cargo.toml"
 RECOMP="$ROOT/target/release/recomp"
 rm -rf "$BUILD"
 status=0
-for SEQ in "${@:-$HERE/seq.s $HERE/simd.s $HERE/cond.s}"; do
+for SEQ in "${@:-$HERE/seq.s $HERE/simd.s $HERE/cond.s $HERE/atomic.s}"; do
 for SEQ in $SEQ; do
 NAME="$(basename "$SEQ" .s)"
 B="$BUILD/$NAME"

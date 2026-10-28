@@ -676,6 +676,15 @@ fn decode_one(
         return Ok(DecodedOutcome::Continue);
     }
 
+    if let Some((access, status)) = decode_exclusive(word) {
+        emit_load_store(access, state, ops);
+        if let Some(rs) = status {
+            let dst = dst_zr(rs, state);
+            ops.push(Op::ConstI64 { dst, imm: 0 });
+        }
+        return Ok(DecodedOutcome::Continue);
+    }
+
     if let Some(decoded) = decode_load_store(word)? {
         emit_load_store(decoded, state, ops);
         return Ok(DecodedOutcome::Continue);
@@ -1573,6 +1582,47 @@ fn decode_simd_move(word: u32, state: &mut DecodeState, ops: &mut Vec<Op>) -> bo
     }
 
     false
+}
+
+/// Load/store exclusive and ordered (LDXR/STXR, LDAXR/STLXR, LDXP/STXP, LDAR/STLR and
+/// their LDLAR/STLLR forms): size 001000 o2 L o1 Rs o0 Rt2 Rn Rt.
+///
+/// ponytail: guest code runs on one host thread, so ordering is free and every
+/// store-exclusive succeeds (status 0). Revisit once guest threads run concurrently.
+fn decode_exclusive(word: u32) -> Option<(LoadStore, Option<u8>)> {
+    if word & 0x3F00_0000 != 0x0800_0000 {
+        return None;
+    }
+    let (o2, is_load, pair) = (
+        (word >> 23) & 1,
+        (word >> 22) & 1 == 1,
+        (word >> 21) & 1 == 1,
+    );
+    if o2 == 1 && pair {
+        return None; // CAS family
+    }
+    let size = if pair {
+        if word >> 31 == 0 {
+            return None;
+        }
+        2 + ((word >> 30) & 1) as u8
+    } else {
+        (word >> 30) as u8
+    };
+    let status = (o2 == 0 && !is_load).then_some(((word >> 16) & 0x1F) as u8);
+    let access = LoadStore {
+        is_load,
+        vector: false,
+        size,
+        base: ((word >> 5) & 0x1F) as u8,
+        rt: (word & 0x1F) as u8,
+        rt2: pair.then_some(((word >> 10) & 0x1F) as u8),
+        index: None,
+        offset: 0,
+        writeback: None,
+        sign_extend_to: None,
+    };
+    Some((access, status))
 }
 
 #[derive(Debug, Clone, Copy)]

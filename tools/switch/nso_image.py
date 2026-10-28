@@ -23,6 +23,7 @@ IMPORT_BASE = 0xF000_0000
 IMPORT_STRIDE = 0x10
 HEAP = ("heap", 0x1_0000_0000, 0x400_0000)  # 64 MiB
 STACK = ("stack", 0x2_0000_0000, 0x10_0000)  # 1 MiB
+HLE = ("hle", 0x3_0000_0000, 0x10_0000)  # recomp_runtime::hle::HLE_SCRATCH_BASE
 
 R_AARCH64_ABS64 = 257
 R_AARCH64_GLOB_DAT = 1025
@@ -122,7 +123,7 @@ def main():
                          "permissions": permissions, "init_path": f"{name}.bin",
                          "init_size": len(init), "zero_fill": end - start > len(init)})
         regions.append((name, start, end - start, permissions))
-    for name, base, size in (HEAP, STACK):
+    for name, base, size in (HEAP, STACK, HLE):
         regions.append((name, base, size, {"read": True, "write": True, "execute": False}))
 
     (out_dir / "segments.json").write_text(json.dumps(segments, indent=2))
